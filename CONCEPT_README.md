@@ -149,8 +149,11 @@ python ConceptExtractor.py --k 15  # Reduce sparsity (fewer active concepts)
 import torch
 from ConceptExtractor import ActionConceptModel
 
-# Load full model
-checkpoint = torch.load('concept_models/concept_model.pt')
+# Determine device
+device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+
+# Load full model with device mapping
+checkpoint = torch.load('concept_models/concept_model.pt', map_location=device)
 config = checkpoint['config']
 
 model = ActionConceptModel(

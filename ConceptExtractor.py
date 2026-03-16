@@ -379,9 +379,9 @@ def main():
                         help='Environment name')
     parser.add_argument('--n_episodes', type=int, default=200,
                         help='Number of episodes to collect')
-    parser.add_argument('--hidden_dim', type=int, default=256,
+    parser.add_argument('--hidden_dim', type=int, default=64,
                         help='SAE hidden dimension')
-    parser.add_argument('--k', type=int, default=25,
+    parser.add_argument('--k', type=int, default=5,
                         help='Top-K sparsity')
     parser.add_argument('--n_epochs', type=int, default=50,
                         help='Training epochs')
@@ -444,8 +444,10 @@ def main():
     print("="*60)
     print(f"Model saved to: {args.save_dir}")
     print(f"\nTo load the model:")
-    print(f"  checkpoint = torch.load('{args.save_dir}/concept_model.pt')")
+    print(f"  device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')")
+    print(f"  checkpoint = torch.load('{args.save_dir}/concept_model.pt', map_location=device)")
     print(f"  model.load_state_dict(checkpoint['model_state_dict'])")
+    print(f"  model.to(device)")
 
 
 if __name__ == '__main__':

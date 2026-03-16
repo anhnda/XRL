@@ -21,8 +21,17 @@ def load_concept_model(model_dir='./concept_models'):
     """Load trained concept model and data"""
     print(f"Loading model from {model_dir}...")
 
-    # Load full model
-    checkpoint = torch.load(os.path.join(model_dir, 'concept_model.pt'))
+    # Determine device (use MPS on Mac, CPU otherwise)
+    if torch.backends.mps.is_available():
+        device = torch.device('mps')
+        print(f"Using device: MPS (Apple Silicon)")
+    else:
+        device = torch.device('cpu')
+        print(f"Using device: CPU")
+
+    # Load full model with device mapping
+    checkpoint = torch.load(os.path.join(model_dir, 'concept_model.pt'),
+                           map_location=device)
     config = checkpoint['config']
 
     model = ActionConceptModel(
@@ -33,10 +42,12 @@ def load_concept_model(model_dir='./concept_models'):
         predictor_type=config['predictor_type']
     )
     model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
     model.eval()
 
-    # Load sample data
-    sample_data = torch.load(os.path.join(model_dir, 'sample_data.pt'))
+    # Load sample data with device mapping
+    sample_data = torch.load(os.path.join(model_dir, 'sample_data.pt'),
+                            map_location=device)
     features = sample_data['features']
     actions = sample_data['actions']
 
@@ -111,7 +122,7 @@ def visualize_observations_for_concept(ppo_model, env_name, concept_idx,
 
     # Find closest matches to target features
     all_features = torch.cat(feature_list, dim=0)
-    target_features = features[top_indices]
+    target_features = features[top_indices].cpu()  # Move to CPU for comparison
 
     # Match by L2 distance
     matched_indices = []
@@ -164,7 +175,7 @@ def plot_concept_activation_distribution(model, features, save_dir):
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
     # 1. Activation rate histogram
-    axes[0, 0].hist(activation_rates.numpy() * 100, bins=50, edgecolor='black')
+    axes[0, 0].hist(activation_rates.cpu().numpy() * 100, bins=50, edgecolor='black')
     axes[0, 0].set_xlabel('Activation Rate (%)')
     axes[0, 0].set_ylabel('Number of Concepts')
     axes[0, 0].set_title('Distribution of Concept Activation Rates')
@@ -186,7 +197,7 @@ def plot_concept_activation_distribution(model, features, save_dir):
     axes[0, 1].grid(True, alpha=0.3)
 
     # 3. Max activation
-    axes[1, 0].hist(max_activations.numpy(), bins=50, edgecolor='black', color='green')
+    axes[1, 0].hist(max_activations.cpu().numpy(), bins=50, edgecolor='black', color='green')
     axes[1, 0].set_xlabel('Max Activation')
     axes[1, 0].set_ylabel('Number of Concepts')
     axes[1, 0].set_title('Distribution of Maximum Activations')
@@ -194,7 +205,7 @@ def plot_concept_activation_distribution(model, features, save_dir):
 
     # 4. Sparsity per sample
     sparsity_per_sample = (concepts > 0).float().sum(dim=1)
-    axes[1, 1].hist(sparsity_per_sample.numpy(), bins=50, edgecolor='black', color='red')
+    axes[1, 1].hist(sparsity_per_sample.cpu().numpy(), bins=50, edgecolor='black', color='red')
     axes[1, 1].set_xlabel('Number of Active Concepts')
     axes[1, 1].set_ylabel('Number of Samples')
     axes[1, 1].set_title('Distribution of Active Concepts per Sample')
@@ -223,7 +234,7 @@ def plot_concept_action_correlation(model, features, actions, save_dir):
         action_logits = model.action_predictor(concepts)
 
     concepts = concepts.cpu().numpy()
-    actions = actions.numpy()
+    actions = actions.cpu().numpy()
 
     n_concepts = concepts.shape[1]
     n_actions = action_logits.shape[1]
@@ -328,7 +339,7 @@ def generate_concept_summary(model, features, actions, save_dir, top_k=20):
         _, concepts = model.sae(features)
 
     concepts_np = concepts.cpu().numpy()
-    actions_np = actions.numpy()
+    actions_np = actions.cpu().numpy()
 
     # Metrics for each concept
     activation_rate = (concepts_np > 0).mean(axis=0)
@@ -359,12 +370,24 @@ def generate_concept_summary(model, features, actions, save_dir, top_k=20):
             f.write(f"  Max activation:  {max_activation[concept_idx]:.3f}\n")
 
             # Top actions influenced by this concept
-            top_actions = np.argsort(np.abs(weights[:, concept_idx]))[-3:][::-1]
-            f.write(f"  Top actions influenced:\n")
             action_names = ['Turn Left', 'Turn Right', 'Forward', 'Pickup', 'Drop', 'Toggle', 'Done']
-            for action_idx in top_actions:
-                weight = weights[action_idx, concept_idx]
-                f.write(f"    {action_names[action_idx]:12s}: {weight:+.3f}\n")
+            concept_weights = weights[:, concept_idx]
+
+            # Show top positive and negative influences
+            positive_indices = np.where(concept_weights > 0)[0]
+            negative_indices = np.where(concept_weights < 0)[0]
+
+            if len(positive_indices) > 0:
+                top_positive = positive_indices[np.argsort(concept_weights[positive_indices])[-2:][::-1]]
+                f.write(f"  Most encouraged actions:\n")
+                for action_idx in top_positive:
+                    f.write(f"    {action_names[action_idx]:12s}: {concept_weights[action_idx]:+.3f}\n")
+
+            if len(negative_indices) > 0:
+                top_negative = negative_indices[np.argsort(concept_weights[negative_indices])[:2]]
+                f.write(f"  Most inhibited actions:\n")
+                for action_idx in top_negative:
+                    f.write(f"    {action_names[action_idx]:12s}: {concept_weights[action_idx]:+.3f}\n")
 
             # When is this concept active?
             active_samples = np.where(concepts_np[:, concept_idx] > 0)[0]
@@ -372,7 +395,9 @@ def generate_concept_summary(model, features, actions, save_dir, top_k=20):
                 actions_when_active = actions_np[active_samples]
                 unique, counts = np.unique(actions_when_active, return_counts=True)
                 top_action_when_active = unique[np.argmax(counts)]
-                f.write(f"  Most common action when active: {action_names[top_action_when_active]}\n")
+                f.write(f"  Most common action when active: {action_names[top_action_when_active]}")
+                # Show the weight for this action to explain the connection
+                f.write(f" (weight: {concept_weights[top_action_when_active]:+.3f})\n")
 
             f.write("\n")
 
@@ -420,7 +445,12 @@ def main():
     if not args.skip_obs_viz:
         # Load PPO model for observation reconstruction
         print(f"\nLoading PPO model from {args.ppo_path}...")
-        ppo_model = PPO.load(args.ppo_path)
+        # Determine device
+        if torch.backends.mps.is_available():
+            device = 'mps'
+        else:
+            device = 'cpu'
+        ppo_model = PPO.load(args.ppo_path, device=device)
 
         # Determine which concepts to visualize
         if args.visualize_concepts:
