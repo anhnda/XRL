@@ -36,8 +36,7 @@ class MinigridFeaturesExtractor(BaseFeaturesExtractor):
         )
 
         with torch.no_grad():
-            sample = torch.as_tensor(observation_space.sample()[None]).float()  # NHWC
-            sample = sample.permute(0, 3, 1, 2)  # NCHW
+            sample = torch.as_tensor(observation_space.sample()[None]).float()  # Already NCHW
             n_flatten = self.cnn(sample).shape[1]
 
         self.linear = nn.Sequential(
@@ -46,10 +45,7 @@ class MinigridFeaturesExtractor(BaseFeaturesExtractor):
         )
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        # observations come in as NHWC from VecTransposeImage? Actually after
-        # VecTransposeImage, they arrive as NCHW. Support both to be safe.
-        if observations.dim() == 4 and observations.shape[1] not in (1, 3):
-            observations = observations.permute(0, 3, 1, 2)
+        # VecTransposeImage ensures observations are already in NCHW format
         return self.linear(self.cnn(observations.float()))
 
 
