@@ -379,9 +379,9 @@ def main():
                         help='Environment name')
     parser.add_argument('--n_episodes', type=int, default=200,
                         help='Number of episodes to collect')
-    parser.add_argument('--hidden_dim', type=int, default=64,
+    parser.add_argument('--hidden_dim', type=int, default=16,
                         help='SAE hidden dimension')
-    parser.add_argument('--k', type=int, default=5,
+    parser.add_argument('--k', type=int, default=3,
                         help='Top-K sparsity')
     parser.add_argument('--n_epochs', type=int, default=50,
                         help='Training epochs')
@@ -391,7 +391,7 @@ def main():
                         help='Learning rate')
     parser.add_argument('--alpha', type=float, default=1.0,
                         help='Reconstruction loss weight')
-    parser.add_argument('--beta', type=float, default=1.0,
+    parser.add_argument('--beta', type=float, default=2.0,
                         help='Action loss weight')
     parser.add_argument('--predictor_type', type=str, default='linear',
                         choices=['linear', 'mlp'], help='Action predictor type')
