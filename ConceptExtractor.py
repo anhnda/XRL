@@ -199,15 +199,17 @@ def train_concept_model(features, actions, config):
     # Loss weights
     alpha = config['alpha']  # Reconstruction loss weight
     beta = config['beta']    # Action loss weight
+    gamma = config['gamma']  # Diversity loss weight
 
     # Training loop
     print(f"\nTraining for {config['n_epochs']} epochs...")
-    print(f"Loss weights: α(recon)={alpha}, β(action)={beta}")
+    print(f"Loss weights: α(recon)={alpha}, β(action)={beta}, γ(diversity)={gamma}")
 
     for epoch in range(config['n_epochs']):
         total_loss = 0
         total_recon_loss = 0
         total_action_loss = 0
+        total_diversity_loss = 0
         total_correct = 0
         total_samples = 0
 
@@ -223,8 +225,13 @@ def train_concept_model(features, actions, config):
             recon_loss = F.mse_loss(x_recon, batch_features)
             action_loss = F.cross_entropy(action_logits, batch_actions)
 
+            # Diversity loss: encourage different concepts across batch
+            # Penalize when all samples use the same concepts
+            concept_usage = (concepts > 0).float().mean(dim=0)  # [hidden_dim]
+            diversity_loss = -torch.std(concept_usage)  # Higher std = more diverse usage
+
             # Multi-objective loss
-            loss = alpha * recon_loss + beta * action_loss
+            loss = alpha * recon_loss + beta * action_loss + gamma * diversity_loss
 
             # Backward pass
             optimizer.zero_grad()
@@ -235,6 +242,7 @@ def train_concept_model(features, actions, config):
             total_loss += loss.item()
             total_recon_loss += recon_loss.item()
             total_action_loss += action_loss.item()
+            total_diversity_loss += diversity_loss.item()
 
             # Accuracy
             pred_actions = action_logits.argmax(dim=-1)
@@ -246,6 +254,7 @@ def train_concept_model(features, actions, config):
                 'loss': f'{loss.item():.4f}',
                 'recon': f'{recon_loss.item():.4f}',
                 'action': f'{action_loss.item():.4f}',
+                'div': f'{diversity_loss.item():.4f}',
                 'acc': f'{100.0 * total_correct / total_samples:.1f}%'
             })
 
@@ -253,12 +262,14 @@ def train_concept_model(features, actions, config):
         avg_loss = total_loss / len(dataloader)
         avg_recon = total_recon_loss / len(dataloader)
         avg_action = total_action_loss / len(dataloader)
+        avg_diversity = total_diversity_loss / len(dataloader)
         accuracy = 100.0 * total_correct / total_samples
 
         print(f"Epoch {epoch+1} Summary:")
         print(f"  Total Loss: {avg_loss:.4f}")
         print(f"  Recon Loss: {avg_recon:.4f}")
         print(f"  Action Loss: {avg_action:.4f}")
+        print(f"  Diversity Loss: {avg_diversity:.4f}")
         print(f"  Action Accuracy: {accuracy:.2f}%")
 
         # Analyze sparsity
@@ -393,6 +404,8 @@ def main():
                         help='Reconstruction loss weight')
     parser.add_argument('--beta', type=float, default=2.0,
                         help='Action loss weight')
+    parser.add_argument('--gamma', type=float, default=0.1,
+                        help='Diversity loss weight (encourage different concept usage)')
     parser.add_argument('--predictor_type', type=str, default='linear',
                         choices=['linear', 'mlp'], help='Action predictor type')
     parser.add_argument('--save_dir', type=str, default='./concept_models',
@@ -426,6 +439,7 @@ def main():
         'learning_rate': args.lr,
         'alpha': args.alpha,
         'beta': args.beta,
+        'gamma': args.gamma,
         'env_name': args.env_name,
         'model_path': args.model_path,
     }
