@@ -136,6 +136,9 @@ def visualize_observations_for_concept(ppo_model, env_name, concept_idx,
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
     fig.suptitle(f'Concept {concept_idx}: Top Activating Examples', fontsize=16)
 
+    # Get model device
+    device = next(model.parameters()).device
+
     for idx, ax in enumerate(axes.flat):
         if idx < n_examples:
             obs_idx = matched_indices[idx]
@@ -143,7 +146,8 @@ def visualize_observations_for_concept(ppo_model, env_name, concept_idx,
 
             # Get activation value
             with torch.no_grad():
-                _, concepts = model.sae(all_features[obs_idx:obs_idx+1])
+                feat = all_features[obs_idx:obs_idx+1].to(device)
+                _, concepts = model.sae(feat)
                 activation = concepts[0, concept_idx].item()
 
             ax.imshow(rgb)

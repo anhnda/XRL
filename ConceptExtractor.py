@@ -21,11 +21,12 @@ from tqdm import tqdm
 class SparseAutoencoder(nn.Module):
     """Sparse Autoencoder with TopK sparsity constraint"""
 
-    def __init__(self, input_dim=128, hidden_dim=256, k=25):
+    def __init__(self, input_dim=128, hidden_dim=256, k=25, binary=False):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.k = k  # Top-K sparsity
+        self.binary = binary  # Binary concepts (0/1) or continuous
 
         # Encoder: maps features to sparse concepts
         self.encoder = nn.Linear(input_dim, hidden_dim, bias=True)
@@ -42,9 +43,9 @@ class SparseAutoencoder(nn.Module):
     def encode(self, x):
         """Encode features to sparse concepts"""
         h = F.relu(self.encoder(x))  # Positive activations only
-        return self.topk_sparse(h, self.k)
+        return self.topk_sparse(h, self.k, binary=self.binary)
 
-    def topk_sparse(self, h, k):
+    def topk_sparse(self, h, k, binary=False):
         """Keep only top-k activations per sample"""
         batch_size = h.shape[0]
 
@@ -53,7 +54,12 @@ class SparseAutoencoder(nn.Module):
 
         # Create sparse tensor
         sparse_h = torch.zeros_like(h)
-        sparse_h.scatter_(-1, indices, values)
+        if binary:
+            # Binary mode: set top-k to 1, rest to 0
+            sparse_h.scatter_(-1, indices, torch.ones_like(values))
+        else:
+            # Continuous mode: keep actual values
+            sparse_h.scatter_(-1, indices, values)
 
         return sparse_h
 
@@ -74,9 +80,9 @@ class ActionConceptModel(nn.Module):
     """
 
     def __init__(self, input_dim=128, hidden_dim=256, n_actions=7, k=25,
-                 predictor_type='linear'):
+                 predictor_type='linear', binary=False):
         super().__init__()
-        self.sae = SparseAutoencoder(input_dim, hidden_dim, k)
+        self.sae = SparseAutoencoder(input_dim, hidden_dim, k, binary=binary)
 
         # Action predictor: concepts -> action logits
         if predictor_type == 'linear':
@@ -181,7 +187,8 @@ def train_concept_model(features, actions, config):
         hidden_dim=config['hidden_dim'],
         n_actions=config['n_actions'],
         k=config['k'],
-        predictor_type=config['predictor_type']
+        predictor_type=config['predictor_type'],
+        binary=config.get('binary', False)
     ).to(device)
 
     # Create dataset and dataloader
@@ -406,6 +413,8 @@ def main():
                         help='Action loss weight')
     parser.add_argument('--gamma', type=float, default=0.1,
                         help='Diversity loss weight (encourage different concept usage)')
+    parser.add_argument('--binary', action='store_true',
+                        help='Use binary concepts (0/1) instead of continuous values')
     parser.add_argument('--predictor_type', type=str, default='linear',
                         choices=['linear', 'mlp'], help='Action predictor type')
     parser.add_argument('--save_dir', type=str, default='./concept_models',
@@ -434,6 +443,7 @@ def main():
         'n_actions': 7,  # MiniGrid has 7 actions
         'k': args.k,
         'predictor_type': args.predictor_type,
+        'binary': args.binary,
         'n_epochs': args.n_epochs,
         'batch_size': args.batch_size,
         'learning_rate': args.lr,
