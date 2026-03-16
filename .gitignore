@@ -10,3 +10,4 @@ venv/
 .claude
 result/
 .push.sh
+ppo_doorkey*
