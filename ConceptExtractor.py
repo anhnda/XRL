@@ -280,10 +280,13 @@ def train_concept_model(features, actions, config):
             recon_loss = F.mse_loss(x_recon, batch_features)
             action_loss = F.cross_entropy(action_logits, batch_actions)
 
-            # Diversity loss: encourage different concepts across batch
-            # Penalize when all samples use the same concepts
+            # Diversity loss: penalize concepts that are always active (saturation)
             concept_usage = (concepts > 0).float().mean(dim=0)  # [hidden_dim]
-            diversity_loss = -torch.std(concept_usage)  # Higher std = more diverse usage
+            # Penalize high activation rates (>80%) directly
+            saturation_penalty = F.relu(concept_usage - 0.8).mean()
+            # Also encourage variance across concepts
+            variance_bonus = -torch.std(concept_usage)
+            diversity_loss = saturation_penalty + 0.5 * variance_bonus
 
             # Multi-objective loss
             loss = alpha * recon_loss + beta * action_loss + gamma * diversity_loss
