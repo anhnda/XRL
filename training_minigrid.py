@@ -23,13 +23,15 @@ class MinigridFeaturesExtractor(BaseFeaturesExtractor):
         super().__init__(observation_space, features_dim)
 
         # ImgObsWrapper gives HWC uint8 image, e.g. (7, 7, 3)
-        h, w, c = observation_space.shape
-        print(f"MiniGrid observation shape: {observation_space.shape}")
+        # For MiniGrid partial observations, shape is typically (7, 7, 3)
+        n_input_channels = observation_space.shape[-1]  # Last dimension is channels
+        print(f"MiniGrid observation shape: {observation_space.shape}, using {n_input_channels} input channels")
 
+        # Simpler architecture for small MiniGrid observations
         self.cnn = nn.Sequential(
-            nn.Conv2d(c, 16, kernel_size=2, stride=1, padding=1),
+            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=2, stride=1, padding=0),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.Flatten(),
         )
