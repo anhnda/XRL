@@ -22,9 +22,8 @@ class MinigridFeaturesExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space, features_dim: int = 128):
         super().__init__(observation_space, features_dim)
 
-        # ImgObsWrapper gives HWC uint8 image, e.g. (7, 7, 3)
-        # For MiniGrid partial observations, shape is typically (7, 7, 3)
-        n_input_channels = observation_space.shape[-1]  # Last dimension is channels
+        # After VecTransposeImage, observation_space is in CHW format: (3, 7, 7)
+        n_input_channels = observation_space.shape[0]  # First dimension is channels
         print(f"MiniGrid observation shape: {observation_space.shape}, using {n_input_channels} input channels")
 
         # Simpler architecture for small MiniGrid observations
