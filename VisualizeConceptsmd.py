@@ -39,7 +39,10 @@ def load_concept_model(model_dir='./concept_models'):
         hidden_dim=config['hidden_dim'],
         n_actions=config['n_actions'],
         k=config['k'],
-        predictor_type=config['predictor_type']
+        predictor_type=config['predictor_type'],
+        binary=config.get('binary', False),
+        gumbel=config.get('gumbel', False),
+        tau=config.get('tau', 0.5)
     )
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
