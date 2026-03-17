@@ -702,7 +702,7 @@ def main():
     parser.add_argument('--save_dir', type=str, default='./concept_models')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--val_ratio', type=float, default=0.1, help='Validation set ratio (0.0-1.0)')
-    parser.add_argument('--patience', type=int, default=50, help='Early stopping patience')
+    parser.add_argument('--patience', type=int, default=100, help='Early stopping patience')
 
     args = parser.parse_args()
 
