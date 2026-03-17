@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import random
 
 import gymnasium as gym
 import minigrid  # noqa: F401
@@ -146,6 +147,19 @@ def train_sae(features, actions, config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on device: {device}")
 
+    # Set random seeds for reproducibility
+    seed = config.get('seed', 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        # Make cudnn deterministic
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to: {seed}")
+
     # Create model
     model = SparseAutoencoder(
         input_dim=config['input_dim'],
@@ -165,9 +179,17 @@ def train_sae(features, actions, config):
         action_predictor = None
         optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
 
-    # Dataset
+    # Dataset with deterministic DataLoader
     dataset = TensorDataset(features, actions)
-    dataloader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=config['batch_size'],
+        shuffle=True,
+        generator=generator,
+        worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id)
+    )
 
     # Loss weights
     alpha = config.get('alpha', 1.0)  # Reconstruction
@@ -387,8 +409,10 @@ def main():
 
     args = parser.parse_args()
 
-    torch.manual_seed(args.seed)
+    # Set seeds for data collection
+    random.seed(args.seed)
     np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     # Collect data
     features, actions = collect_rollout_data(args.model_path, args.env_name, args.n_episodes, args.seed)
@@ -407,7 +431,8 @@ def main():
         'beta': args.beta,
         'use_action_predictor': args.beta > 0,
         'env_name': args.env_name,
-        'model_path': args.model_path
+        'model_path': args.model_path,
+        'seed': args.seed
     }
 
     # Train
