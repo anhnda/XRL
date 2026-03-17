@@ -73,8 +73,8 @@ class SparseAutoencoder(nn.Module):
         """Encode to sparse binary concepts"""
         logits = self.encoder(x)
 
-        # ReLU activation (continuous, not binary)
-        h = F.relu(logits)
+        # Gumbel-Sigmoid for binary activations
+        h = self.gumbel_sigmoid(logits, tau=self.tau, hard=True)
 
         # TopK sparsity
         concepts = self.topk_mask(h, self.k)
