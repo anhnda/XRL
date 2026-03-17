@@ -1,9 +1,8 @@
 # ConceptExtractor.py
-# Train Sparse Autoencoder to extract interpretable concepts from PPO policy features
+# Simple Sparse Autoencoder with Gumbel-Softmax and TopK sparsity
 
 import argparse
 import os
-from pathlib import Path
 
 import gymnasium as gym
 import minigrid  # noqa: F401
@@ -19,73 +18,39 @@ from tqdm import tqdm
 
 
 class SparseAutoencoder(nn.Module):
-    """Sparse Autoencoder with TopK sparsity constraint"""
+    """Sparse Autoencoder with Gumbel-Softmax and TopK sparsity"""
 
-    def __init__(self, input_dim=128, hidden_dim=256, k=25, binary=False,
-                 gumbel=False, tau=0.5):
+    def __init__(self, input_dim=128, hidden_dim=64, k=10, tau=1.0):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.k = k  # Top-K sparsity
-        self.binary = binary  # Binary concepts (0/1) or continuous
-        self.gumbel = gumbel  # Use Gumbel-Softmax for differentiable binary
-        self.tau = tau  # Temperature for Gumbel-Softmax
+        self.tau = tau  # Gumbel temperature
 
-        # Encoder: maps features to sparse concepts
-        self.encoder = nn.Linear(input_dim, hidden_dim, bias=True)
+        # Encoder and decoder
+        self.encoder = nn.Linear(input_dim, hidden_dim)
+        self.decoder = nn.Linear(hidden_dim, input_dim)
 
-        # Decoder: reconstructs original features from concepts
-        self.decoder = nn.Linear(hidden_dim, input_dim, bias=True)
-
-        # Initialize with small weights for better sparsity
-        nn.init.xavier_uniform_(self.encoder.weight, gain=0.5)
-        nn.init.xavier_uniform_(self.decoder.weight, gain=0.5)
+        # Initialize
+        nn.init.xavier_uniform_(self.encoder.weight)
+        nn.init.xavier_uniform_(self.decoder.weight)
         nn.init.zeros_(self.encoder.bias)
         nn.init.zeros_(self.decoder.bias)
 
-    def encode(self, x):
-        """Encode features to sparse concepts"""
-        if self.gumbel:
-            # Gumbel-Softmax mode: encoder outputs logits
-            logits = self.encoder(x)  # Raw logits, no ReLU
-
-            # Clip logits to prevent saturation (prevent concepts from always being on)
-            logits = torch.clamp(logits, min=-10, max=10)
-
-            # Apply Gumbel-Sigmoid to get binary-ish activations
-            h = self.gumbel_sigmoid(logits, tau=self.tau, hard=True)
-
-            # Apply TopK to keep only k concepts active
-            return self.topk_sparse(h, self.k, binary=False)
-        else:
-            # Standard mode
-            h = F.relu(self.encoder(x))  # Positive activations only
-            return self.topk_sparse(h, self.k, binary=self.binary)
-
-    def gumbel_sigmoid(self, logits, tau=0.5, hard=False):
-        """
-        Gumbel-Sigmoid for differentiable binary sampling
-
-        Args:
-            logits: Raw encoder outputs [batch, hidden_dim]
-            tau: Temperature (lower = more binary)
-            hard: If True, use straight-through estimator for discrete output
-
-        Returns:
-            Binary-like activations with gradients
-        """
+    def gumbel_sigmoid(self, logits, tau=1.0, hard=True):
+        """Gumbel-Sigmoid for differentiable binary sampling"""
         if not self.training and hard:
-            # At inference, return hard binary
             return (torch.sigmoid(logits) > 0.5).float()
 
         # Gumbel noise
-        gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits) + 1e-10) + 1e-10)
+        u = torch.rand_like(logits)
+        gumbel = -torch.log(-torch.log(u + 1e-10) + 1e-10)
 
-        # Add Gumbel noise and apply sigmoid with temperature
-        y_soft = torch.sigmoid((logits + gumbel_noise) / tau)
+        # Gumbel-Sigmoid
+        y_soft = torch.sigmoid((logits + gumbel) / tau)
 
         if hard:
-            # Straight-through estimator: discrete forward, continuous backward
+            # Straight-through estimator
             y_hard = (y_soft > 0.5).float()
             y = (y_hard - y_soft).detach() + y_soft
         else:
@@ -93,27 +58,32 @@ class SparseAutoencoder(nn.Module):
 
         return y
 
-    def topk_sparse(self, h, k, binary=False):
+    def topk_mask(self, h, k):
         """Keep only top-k activations per sample"""
-        batch_size = h.shape[0]
+        # Get top-k indices
+        _, indices = torch.topk(h, k, dim=-1)
 
-        # Get top-k values and indices
-        values, indices = torch.topk(h, k, dim=-1)
+        # Create mask
+        mask = torch.zeros_like(h)
+        mask.scatter_(-1, indices, 1.0)
 
-        # Create sparse tensor
-        sparse_h = torch.zeros_like(h)
-        if binary:
-            # Binary mode: set top-k to 1, rest to 0
-            sparse_h.scatter_(-1, indices, torch.ones_like(values))
-        else:
-            # Continuous mode: keep actual values
-            sparse_h.scatter_(-1, indices, values)
+        return h * mask
 
-        return sparse_h
+    def encode(self, x):
+        """Encode to sparse binary concepts"""
+        logits = self.encoder(x)
 
-    def decode(self, h):
-        """Reconstruct original features from concepts"""
-        return self.decoder(h)
+        # Gumbel-Sigmoid for binary activations
+        h = self.gumbel_sigmoid(logits, tau=self.tau, hard=True)
+
+        # TopK sparsity
+        concepts = self.topk_mask(h, self.k)
+
+        return concepts
+
+    def decode(self, concepts):
+        """Decode back to features"""
+        return self.decoder(concepts)
 
     def forward(self, x):
         concepts = self.encode(x)
@@ -121,44 +91,8 @@ class SparseAutoencoder(nn.Module):
         return x_recon, concepts
 
 
-class ActionConceptModel(nn.Module):
-    """
-    Combined model: SAE + Action Predictor
-    Learns concepts that both reconstruct features AND predict actions
-    """
-
-    def __init__(self, input_dim=128, hidden_dim=256, n_actions=7, k=25,
-                 predictor_type='linear', binary=False, gumbel=False, tau=0.5):
-        super().__init__()
-        self.sae = SparseAutoencoder(input_dim, hidden_dim, k, binary=binary,
-                                     gumbel=gumbel, tau=tau)
-
-        # Action predictor: concepts -> action logits
-        if predictor_type == 'linear':
-            self.action_predictor = nn.Linear(hidden_dim, n_actions)
-        elif predictor_type == 'mlp':
-            self.action_predictor = nn.Sequential(
-                nn.Linear(hidden_dim, 128),
-                nn.ReLU(),
-                nn.Linear(128, n_actions)
-            )
-        else:
-            raise ValueError(f"Unknown predictor_type: {predictor_type}")
-
-    def forward(self, features):
-        x_recon, concepts = self.sae(features)
-        action_logits = self.action_predictor(concepts)
-        return x_recon, concepts, action_logits
-
-
-def collect_rollout_data(model_path, env_name, n_episodes=100, seed=42):
-    """
-    Collect features and actions from trained PPO model rollouts
-
-    Returns:
-        features: (N, 128) tensor of CNN features
-        actions: (N,) tensor of actions taken
-    """
+def collect_rollout_data(model_path, env_name, n_episodes=500, seed=42):
+    """Collect features from PPO rollouts"""
     print(f"Loading PPO model from {model_path}...")
     model = PPO.load(model_path)
 
@@ -176,25 +110,21 @@ def collect_rollout_data(model_path, env_name, n_episodes=100, seed=42):
     features_list = []
     actions_list = []
 
-    print(f"Collecting rollout data from {n_episodes} episodes...")
+    print(f"Collecting {n_episodes} episodes...")
     obs = env.reset()
     episode_count = 0
 
     with torch.no_grad():
         pbar = tqdm(total=n_episodes)
         while episode_count < n_episodes:
-            # Get action from policy
             action, _ = model.predict(obs, deterministic=False)
 
-            # Extract features from the CNN
-            # Access the features extractor's cached features
             obs_tensor = torch.as_tensor(obs).float().to(model.device)
             features = model.policy.features_extractor(obs_tensor)
 
             features_list.append(features.cpu())
             actions_list.append(torch.tensor(action))
 
-            # Step environment
             obs, rewards, dones, infos = env.step(action)
 
             if dones[0]:
@@ -204,212 +134,161 @@ def collect_rollout_data(model_path, env_name, n_episodes=100, seed=42):
 
         pbar.close()
 
-    # Concatenate all data
     features = torch.cat(features_list, dim=0)
     actions = torch.cat(actions_list, dim=0)
 
     print(f"Collected {len(features)} samples")
-    print(f"Features shape: {features.shape}")
-    print(f"Actions shape: {actions.shape}")
-
     return features, actions
 
 
-def train_concept_model(features, actions, config):
-    """
-    Train the ActionConceptModel with multi-objective loss
-
-    Args:
-        features: (N, 128) tensor
-        actions: (N,) tensor
-        config: dict with training hyperparameters
-
-    Returns:
-        trained model
-    """
+def train_sae(features, actions, config):
+    """Train the Sparse Autoencoder"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on device: {device}")
 
     # Create model
-    model = ActionConceptModel(
+    model = SparseAutoencoder(
         input_dim=config['input_dim'],
         hidden_dim=config['hidden_dim'],
-        n_actions=config['n_actions'],
         k=config['k'],
-        predictor_type=config['predictor_type'],
-        binary=config.get('binary', False),
-        gumbel=config.get('gumbel', False),
-        tau=config.get('tau', 0.5)
+        tau=config['tau']
     ).to(device)
 
-    # Create dataset and dataloader
-    dataset = TensorDataset(features, actions)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=config['batch_size'],
-        shuffle=True,
-        num_workers=0
-    )
+    # Optional action predictor
+    if config.get('use_action_predictor', False):
+        action_predictor = nn.Linear(config['hidden_dim'], config['n_actions']).to(device)
+        optimizer = torch.optim.Adam(
+            list(model.parameters()) + list(action_predictor.parameters()),
+            lr=config['lr']
+        )
+    else:
+        action_predictor = None
+        optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
 
-    # Optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
+    # Dataset
+    dataset = TensorDataset(features, actions)
+    dataloader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
 
     # Loss weights
-    alpha = config['alpha']  # Reconstruction loss weight
-    beta = config['beta']    # Action loss weight
-    gamma = config['gamma']  # Diversity loss weight
+    alpha = config.get('alpha', 1.0)  # Reconstruction
+    beta = config.get('beta', 0.0)    # Action prediction
 
-    # Training loop
     print(f"\nTraining for {config['n_epochs']} epochs...")
-    print(f"Loss weights: α(recon)={alpha}, β(action)={beta}, γ(diversity)={gamma}")
-
-    # Track global activation rates with exponential moving average
-    global_activation_rate = None
-    ema_momentum = 0.99  # Slow decay to track long-term patterns
+    print(f"Loss weights: α(recon)={alpha}, β(action)={beta}")
 
     for epoch in range(config['n_epochs']):
         total_loss = 0
-        total_recon_loss = 0
-        total_action_loss = 0
-        total_diversity_loss = 0
+        total_recon = 0
+        total_action = 0
         total_correct = 0
         total_samples = 0
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config['n_epochs']}")
+
         for batch_features, batch_actions in pbar:
             batch_features = batch_features.to(device)
             batch_actions = batch_actions.to(device)
 
-            # Forward pass
-            x_recon, concepts, action_logits = model(batch_features)
+            # Forward
+            x_recon, concepts = model(batch_features)
 
-            # Compute losses
+            # Reconstruction loss
             recon_loss = F.mse_loss(x_recon, batch_features)
-            action_loss = F.cross_entropy(action_logits, batch_actions)
 
-            # Diversity loss: penalize concepts that are always active (saturation)
-            concept_usage = (concepts > 0).float().mean(dim=0)  # [hidden_dim] - batch stats
+            # Total loss
+            loss = alpha * recon_loss
 
-            # Update global activation rate (exponential moving average) for monitoring
-            if global_activation_rate is None:
-                global_activation_rate = concept_usage.detach()
+            # Optional action loss
+            if action_predictor is not None:
+                action_logits = action_predictor(concepts)
+                action_loss = F.cross_entropy(action_logits, batch_actions)
+                loss += beta * action_loss
+
+                pred = action_logits.argmax(dim=-1)
+                total_correct += (pred == batch_actions).sum().item()
+                total_action += action_loss.item()
             else:
-                global_activation_rate = ema_momentum * global_activation_rate + (1 - ema_momentum) * concept_usage.detach()
+                action_loss = torch.tensor(0.0)
 
-            # Use CURRENT BATCH for gradient (not detached global stats)
-            # This allows gradients to flow back to encoder
-            target_rate = config['k'] / config['hidden_dim']
-
-            # Penalize deviation from target in current batch
-            deviation = torch.abs(concept_usage - target_rate).mean()
-
-            # Strong penalty for any concept active >80% in this batch
-            saturation_penalty = (F.relu(concept_usage - 0.8) ** 2).mean()
-
-            # Penalty for dead concepts in this batch
-            dead_penalty = (F.relu(0.1 - concept_usage) ** 2).mean()
-
-            diversity_loss = deviation + 10.0 * saturation_penalty + 1.0 * dead_penalty
-
-            # Multi-objective loss
-            loss = alpha * recon_loss + beta * action_loss + gamma * diversity_loss
-
-            # Backward pass
+            # Backward
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            # Track metrics
+            # Track
             total_loss += loss.item()
-            total_recon_loss += recon_loss.item()
-            total_action_loss += action_loss.item()
-            total_diversity_loss += diversity_loss.item()
-
-            # Accuracy
-            pred_actions = action_logits.argmax(dim=-1)
-            total_correct += (pred_actions == batch_actions).sum().item()
+            total_recon += recon_loss.item()
             total_samples += len(batch_actions)
 
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'recon': f'{recon_loss.item():.4f}',
-                'action': f'{action_loss.item():.4f}',
-                'div': f'{diversity_loss.item():.4f}',
-                'acc': f'{100.0 * total_correct / total_samples:.1f}%'
-            })
+            # Progress
+            if action_predictor is not None:
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'recon': f'{recon_loss.item():.4f}',
+                    'action': f'{action_loss.item():.4f}',
+                    'acc': f'{100.0 * total_correct / total_samples:.1f}%'
+                })
+            else:
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'recon': f'{recon_loss.item():.4f}'
+                })
 
         # Epoch summary
-        avg_loss = total_loss / len(dataloader)
-        avg_recon = total_recon_loss / len(dataloader)
-        avg_action = total_action_loss / len(dataloader)
-        avg_diversity = total_diversity_loss / len(dataloader)
-        accuracy = 100.0 * total_correct / total_samples
+        print(f"Epoch {epoch+1}:")
+        print(f"  Recon Loss: {total_recon / len(dataloader):.4f}")
+        if action_predictor is not None:
+            print(f"  Action Loss: {total_action / len(dataloader):.4f}")
+            print(f"  Action Acc: {100.0 * total_correct / total_samples:.2f}%")
 
-        print(f"Epoch {epoch+1} Summary:")
-        print(f"  Total Loss: {avg_loss:.4f}")
-        print(f"  Recon Loss: {avg_recon:.4f}")
-        print(f"  Action Loss: {avg_action:.4f}")
-        print(f"  Diversity Loss: {avg_diversity:.4f}")
-        print(f"  Action Accuracy: {accuracy:.2f}%")
+        # Sparsity analysis
+        if (epoch + 1) % 10 == 0:
+            with torch.no_grad():
+                sample_features = features[:1000].to(device)
+                _, sample_concepts = model(sample_features)
 
-        # Monitor saturation in global activation rates
-        if global_activation_rate is not None:
-            n_saturated = (global_activation_rate > 0.8).sum().item()
-            n_dead = (global_activation_rate < 0.05).sum().item()
-            print(f"  Global stats: {n_saturated} saturated (>80%), {n_dead} dead (<5%)")
+                active_rate = (sample_concepts > 0).float().mean(dim=0)
+                n_active = (active_rate > 0.01).sum().item()
+                avg_sparsity = (sample_concepts > 0).float().mean().item()
 
-        # Analyze sparsity
-        with torch.no_grad():
-            sample_features = features[:1000].to(device)
-            _, sample_concepts = model.sae(sample_features)
-            active_rate = (sample_concepts > 0).float().mean(dim=0)
-            n_active_concepts = (active_rate > 0.01).sum().item()
-            avg_sparsity = (sample_concepts > 0).float().mean().item()
+                print(f"  Active concepts: {n_active}/{config['hidden_dim']}")
+                print(f"  Avg sparsity: {100 * avg_sparsity:.1f}%")
 
-            print(f"  Active concepts: {n_active_concepts}/{config['hidden_dim']}")
-            print(f"  Avg sparsity: {100 * avg_sparsity:.1f}%")
-
-    return model
+    if action_predictor is not None:
+        return model, action_predictor
+    return model, None
 
 
-def save_model(model, features, actions, config, save_dir='./concept_models'):
-    """Save trained model and metadata"""
+def save_model(model, action_predictor, features, actions, config, save_dir='./concept_models'):
+    """Save model"""
     os.makedirs(save_dir, exist_ok=True)
 
-    # Save model weights
-    model_path = os.path.join(save_dir, 'concept_model.pt')
+    # Save SAE
     torch.save({
-        'model_state_dict': model.state_dict(),
-        'config': config,
-    }, model_path)
-    print(f"\nModel saved to {model_path}")
+        'encoder_weight': model.encoder.weight.data,
+        'encoder_bias': model.encoder.bias.data,
+        'decoder_weight': model.decoder.weight.data,
+        'decoder_bias': model.decoder.bias.data,
+        'config': config
+    }, os.path.join(save_dir, 'sae.pt'))
 
-    # Save SAE separately for easy loading
-    sae_path = os.path.join(save_dir, 'sae.pt')
-    torch.save({
-        'encoder_weight': model.sae.encoder.weight.data,
-        'encoder_bias': model.sae.encoder.bias.data,
-        'decoder_weight': model.sae.decoder.weight.data,
-        'decoder_bias': model.sae.decoder.bias.data,
-        'config': {
-            'input_dim': config['input_dim'],
-            'hidden_dim': config['hidden_dim'],
-            'k': config['k']
-        }
-    }, sae_path)
-    print(f"SAE saved to {sae_path}")
+    # Save action predictor if exists
+    if action_predictor is not None:
+        torch.save({
+            'weight': action_predictor.weight.data,
+            'bias': action_predictor.bias.data
+        }, os.path.join(save_dir, 'action_predictor.pt'))
 
-    # Save sample data for analysis
-    sample_path = os.path.join(save_dir, 'sample_data.pt')
+    # Save sample data
     torch.save({
         'features': features[:1000],
         'actions': actions[:1000]
-    }, sample_path)
-    print(f"Sample data saved to {sample_path}")
+    }, os.path.join(save_dir, 'sample_data.pt'))
+
+    print(f"\nModel saved to {save_dir}")
 
 
-def analyze_concepts(model, features, actions, top_k=10):
+def analyze_concepts(model, features):
     """Analyze learned concepts"""
     device = next(model.parameters()).device
     features = features.to(device)
@@ -419,145 +298,78 @@ def analyze_concepts(model, features, actions, top_k=10):
     print("="*60)
 
     with torch.no_grad():
-        _, concepts = model.sae(features)
+        _, concepts = model(features)
 
-        # 1. Overall statistics
-        print("\n1. Overall Statistics:")
         active_mask = concepts > 0
         active_rate = active_mask.float().mean(dim=0)
+
         n_active = (active_rate > 0.01).sum().item()
         n_dead = (active_rate < 0.001).sum().item()
 
-        print(f"   Active concepts (>1% activation): {n_active}/{concepts.shape[1]}")
-        print(f"   Dead concepts (<0.1% activation): {n_dead}/{concepts.shape[1]}")
-        print(f"   Average sparsity per sample: {active_mask.float().mean().item()*100:.1f}%")
+        print(f"\nActive concepts (>1%): {n_active}/{concepts.shape[1]}")
+        print(f"Dead concepts (<0.1%): {n_dead}/{concepts.shape[1]}")
+        print(f"Avg sparsity: {active_mask.float().mean().item()*100:.1f}%")
 
-        # 2. Most active concepts
-        print("\n2. Most Active Concepts (by activation rate):")
-        top_active_indices = active_rate.argsort(descending=True)[:top_k]
-        for rank, idx in enumerate(top_active_indices):
-            idx_val = idx.item()
-            rate = active_rate[idx].item()
-            avg_value = concepts[active_mask[:, idx_val], idx_val].mean().item()
-            print(f"   Rank {rank+1}: Concept {idx_val:3d} - Active {rate*100:5.1f}% of time, Avg value: {avg_value:.3f}")
-
-        # 3. Strongest concepts
-        print("\n3. Strongest Concepts (by max activation):")
-        max_activations = concepts.max(dim=0)[0]
-        top_strong_indices = max_activations.argsort(descending=True)[:top_k]
-        for rank, idx in enumerate(top_strong_indices):
-            idx_val = idx.item()
-            max_val = max_activations[idx].item()
-            rate = active_rate[idx].item()
-            print(f"   Rank {rank+1}: Concept {idx_val:3d} - Max: {max_val:.3f}, Active: {rate*100:5.1f}%")
-
-        # 4. Action prediction analysis
-        print("\n4. Action Prediction Analysis:")
-        action_logits = model.action_predictor(concepts)
-        pred_actions = action_logits.argmax(dim=-1)
-        accuracy = (pred_actions == actions.to(device)).float().mean().item()
-        print(f"   Overall accuracy: {accuracy*100:.2f}%")
-
-        # Per-action accuracy
-        n_actions = action_logits.shape[-1]
-        print(f"   Per-action accuracy:")
-        for a in range(n_actions):
-            mask = actions == a
-            if mask.sum() > 0:
-                acc = (pred_actions[mask.to(device)] == a).float().mean().item()
-                count = mask.sum().item()
-                print(f"     Action {a}: {acc*100:5.1f}% ({count:5d} samples)")
+        # Top concepts
+        print(f"\nTop 10 most active concepts:")
+        top_indices = active_rate.argsort(descending=True)[:10]
+        for rank, idx in enumerate(top_indices):
+            print(f"  {rank+1}. Concept {idx.item():3d}: {active_rate[idx].item()*100:5.1f}% active")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Sparse Autoencoder for concept extraction')
-    parser.add_argument('--model_path', type=str, default='ppo_doorkey_5x5.zip',
-                        help='Path to trained PPO model')
-    parser.add_argument('--env_name', type=str, default='MiniGrid-DoorKey-5x5-v0',
-                        help='Environment name')
-    parser.add_argument('--n_episodes', type=int, default=200,
-                        help='Number of episodes to collect')
-    parser.add_argument('--hidden_dim', type=int, default=16,
-                        help='SAE hidden dimension')
-    parser.add_argument('--k', type=int, default=3,
-                        help='Top-K sparsity')
-    parser.add_argument('--n_epochs', type=int, default=50,
-                        help='Training epochs')
-    parser.add_argument('--batch_size', type=int, default=256,
-                        help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-3,
-                        help='Learning rate')
-    parser.add_argument('--alpha', type=float, default=1.0,
-                        help='Reconstruction loss weight')
-    parser.add_argument('--beta', type=float, default=2.0,
-                        help='Action loss weight')
-    parser.add_argument('--gamma', type=float, default=0.1,
-                        help='Diversity loss weight (encourage different concept usage)')
-    parser.add_argument('--binary', action='store_true',
-                        help='Use binary concepts (0/1) instead of continuous values')
-    parser.add_argument('--gumbel', action='store_true',
-                        help='Use Gumbel-Softmax for differentiable binary concepts')
-    parser.add_argument('--tau', type=float, default=0.5,
-                        help='Temperature for Gumbel-Softmax (lower = more binary)')
-    parser.add_argument('--predictor_type', type=str, default='linear',
-                        choices=['linear', 'mlp'], help='Action predictor type')
-    parser.add_argument('--save_dir', type=str, default='./concept_models',
-                        help='Directory to save models')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, default='ppo_doorkey_5x5.zip')
+    parser.add_argument('--env_name', type=str, default='MiniGrid-DoorKey-5x5-v0')
+    parser.add_argument('--n_episodes', type=int, default=500)
+    parser.add_argument('--hidden_dim', type=int, default=32)
+    parser.add_argument('--k', type=int, default=10)
+    parser.add_argument('--tau', type=float, default=1.0)
+    parser.add_argument('--n_epochs', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--alpha', type=float, default=1.0, help='Reconstruction loss weight')
+    parser.add_argument('--beta', type=float, default=0.0, help='Action loss weight (0=no action predictor)')
+    parser.add_argument('--save_dir', type=str, default='./concept_models')
+    parser.add_argument('--seed', type=int, default=42)
 
     args = parser.parse_args()
 
-    # Set seeds
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    # 1. Collect rollout data
-    features, actions = collect_rollout_data(
-        args.model_path,
-        args.env_name,
-        n_episodes=args.n_episodes,
-        seed=args.seed
-    )
+    # Collect data
+    features, actions = collect_rollout_data(args.model_path, args.env_name, args.n_episodes, args.seed)
 
-    # 2. Training config
+    # Config
     config = {
         'input_dim': 128,
         'hidden_dim': args.hidden_dim,
-        'n_actions': 7,  # MiniGrid has 7 actions
         'k': args.k,
-        'predictor_type': args.predictor_type,
-        'binary': args.binary,
-        'gumbel': args.gumbel,
         'tau': args.tau,
+        'n_actions': 7,
         'n_epochs': args.n_epochs,
         'batch_size': args.batch_size,
-        'learning_rate': args.lr,
+        'lr': args.lr,
         'alpha': args.alpha,
         'beta': args.beta,
-        'gamma': args.gamma,
+        'use_action_predictor': args.beta > 0,
         'env_name': args.env_name,
-        'model_path': args.model_path,
+        'model_path': args.model_path
     }
 
-    # 3. Train model
-    model = train_concept_model(features, actions, config)
+    # Train
+    model, action_predictor = train_sae(features, actions, config)
 
-    # 4. Analyze concepts
-    analyze_concepts(model, features, actions, top_k=15)
+    # Analyze
+    analyze_concepts(model, features)
 
-    # 5. Save model
-    save_model(model, features, actions, config, args.save_dir)
+    # Save
+    save_model(model, action_predictor, features, actions, config, args.save_dir)
 
     print("\n" + "="*60)
-    print("TRAINING COMPLETE!")
+    print("DONE!")
     print("="*60)
-    print(f"Model saved to: {args.save_dir}")
-    print(f"\nTo load the model:")
-    print(f"  device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')")
-    print(f"  checkpoint = torch.load('{args.save_dir}/concept_model.pt', map_location=device)")
-    print(f"  model.load_state_dict(checkpoint['model_state_dict'])")
-    print(f"  model.to(device)")
 
 
 if __name__ == '__main__':
