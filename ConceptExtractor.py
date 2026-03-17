@@ -373,7 +373,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str, default='ppo_doorkey_5x5.zip')
     parser.add_argument('--env_name', type=str, default='MiniGrid-DoorKey-5x5-v0')
-    parser.add_argument('--n_episodes', type=int, default=500)
+    parser.add_argument('--n_episodes', type=int, default=800)
     parser.add_argument('--hidden_dim', type=int, default=32)
     parser.add_argument('--k', type=int, default=10)
     parser.add_argument('--tau', type=float, default=1.0)
