@@ -240,19 +240,47 @@ def train_sae(features, actions, config):
         if action_predictor is not None:
             print(f"  Action Loss: {total_action / len(dataloader):.4f}")
             print(f"  Action Acc: {100.0 * total_correct / total_samples:.2f}%")
+        else:
+            # Even without action predictor, show what accuracy WOULD be
+            # Train a simple linear probe on concepts to estimate interpretability
+            print(f"  Action Acc: (no action predictor)")
 
-        # Sparsity analysis
+        # Sparsity and interpretability analysis
         if (epoch + 1) % 10 == 0:
             with torch.no_grad():
                 sample_features = features[:1000].to(device)
+                sample_actions = actions[:1000].to(device)
                 _, sample_concepts = model(sample_features)
 
+                # Sparsity stats
                 active_rate = (sample_concepts > 0).float().mean(dim=0)
                 n_active = (active_rate > 0.01).sum().item()
                 avg_sparsity = (sample_concepts > 0).float().mean().item()
+                n_saturated = (active_rate > 0.9).sum().item()
 
                 print(f"  Active concepts: {n_active}/{config['hidden_dim']}")
+                print(f"  Saturated (>90%): {n_saturated}")
                 print(f"  Avg sparsity: {100 * avg_sparsity:.1f}%")
+
+                # Quick linear probe to measure interpretability
+                if action_predictor is None:
+                    # Fit quick linear probe to see if concepts are informative
+                    probe = torch.nn.Linear(config['hidden_dim'], config['n_actions']).to(device)
+                    probe_optimizer = torch.optim.Adam(probe.parameters(), lr=0.01)
+
+                    for _ in range(50):  # Quick 50 step training
+                        logits = probe(sample_concepts)
+                        loss = F.cross_entropy(logits, sample_actions)
+                        probe_optimizer.zero_grad()
+                        loss.backward()
+                        probe_optimizer.step()
+
+                    # Test accuracy
+                    with torch.no_grad():
+                        logits = probe(sample_concepts)
+                        pred = logits.argmax(dim=-1)
+                        probe_acc = (pred == sample_actions).float().mean().item()
+                        print(f"  Linear probe acc: {100.0 * probe_acc:.2f}%")
 
     if action_predictor is not None:
         return model, action_predictor
