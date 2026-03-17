@@ -1,0 +1,589 @@
+# ConceptExtractor.py
+# Simple Sparse Autoencoder with Gumbel-Softmax and TopK sparsity
+
+import argparse
+import os
+import random
+
+import gymnasium as gym
+import minigrid  # noqa: F401
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from minigrid.wrappers import ImgObsWrapper
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
+
+
+class SparseAutoencoder(nn.Module):
+    """Sparse Autoencoder with Gumbel-Softmax and TopK sparsity"""
+
+    def __init__(self, input_dim=128, hidden_dim=64, k=10, tau=1.0):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.k = k  # Top-K sparsity
+        self.tau = tau  # Gumbel temperature
+
+        # Encoder and decoder
+        self.encoder = nn.Linear(input_dim, hidden_dim)
+        self.decoder = nn.Linear(hidden_dim, input_dim)
+
+        # Initialize
+        #nn.init.xavier_uniform_(self.encoder.weight)
+        #nn.init.xavier_uniform_(self.decoder.weight)
+        nn.init.zeros_(self.encoder.weight)
+        nn.init.zeros_(self.decoder.weight)
+        nn.init.zeros_(self.encoder.bias)
+        nn.init.zeros_(self.decoder.bias)
+
+    def gumbel_sigmoid(self, logits, tau=1.0, hard=True):
+        """Gumbel-Sigmoid for differentiable binary sampling"""
+        if not self.training and hard:
+            return (torch.sigmoid(logits) > 0.5).float()
+
+        # Gumbel noise
+        u = torch.rand_like(logits)
+        gumbel = -torch.log(-torch.log(u + 1e-10) + 1e-10)
+
+        # Gumbel-Sigmoid
+        y_soft = torch.sigmoid((logits + gumbel) / tau)
+
+        if hard:
+            # Straight-through estimator
+            y_hard = (y_soft > 0.5).float()
+            y = (y_hard - y_soft).detach() + y_soft
+        else:
+            y = y_soft
+
+        return y
+
+    def topk_mask(self, h, k):
+        """Keep only top-k activations per sample"""
+        # Get top-k indices
+        _, indices = torch.topk(h, k, dim=-1)
+
+        # Create mask
+        mask = torch.zeros_like(h)
+        mask.scatter_(-1, indices, 1.0)
+
+        return h * mask
+
+    def encode(self, x):
+        """Encode to sparse binary concepts"""
+        logits = self.encoder(x)
+
+        # Gumbel-Sigmoid for binary activations
+        h = self.gumbel_sigmoid(logits, tau=self.tau, hard=True)
+
+        # TopK sparsity
+        concepts = self.topk_mask(h, self.k)
+
+        return concepts
+
+    def decode(self, concepts):
+        """Decode back to features"""
+        return self.decoder(concepts)
+
+    def forward(self, x):
+        concepts = self.encode(x)
+        x_recon = self.decode(concepts)
+        return x_recon, concepts
+
+
+def collect_rollout_data(model_path, env_name, n_episodes=500, seed=42):
+    """Collect features from PPO rollouts"""
+    print(f"Loading PPO model from {model_path}...")
+    model = PPO.load(model_path)
+
+    # Create environment
+    def make_env():
+        def _init():
+            env = gym.make(env_name)
+            env = ImgObsWrapper(env)
+            return env
+        return _init
+
+    env = DummyVecEnv([make_env()])
+    env = VecTransposeImage(env)
+
+    features_list = []
+    actions_list = []
+
+    print(f"Collecting {n_episodes} episodes...")
+    obs = env.reset()
+    episode_count = 0
+
+    with torch.no_grad():
+        pbar = tqdm(total=n_episodes)
+        while episode_count < n_episodes:
+            action, _ = model.predict(obs, deterministic=False)
+
+            obs_tensor = torch.as_tensor(obs).float().to(model.device)
+            features = model.policy.features_extractor(obs_tensor)
+
+            features_list.append(features.cpu())
+            actions_list.append(torch.tensor(action))
+
+            obs, rewards, dones, infos = env.step(action)
+
+            if dones[0]:
+                episode_count += 1
+                pbar.update(1)
+                obs = env.reset()
+
+        pbar.close()
+
+    features = torch.cat(features_list, dim=0)
+    actions = torch.cat(actions_list, dim=0)
+
+    print(f"Collected {len(features)} samples")
+    return features, actions
+
+
+def train_sae(features, actions, config):
+    """Train the Sparse Autoencoder"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Training on device: {device}")
+
+    # Set random seeds for reproducibility
+    seed = config.get('seed', 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        # Make cudnn deterministic
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to: {seed}")
+
+    # Create model
+    model = SparseAutoencoder(
+        input_dim=config['input_dim'],
+        hidden_dim=config['hidden_dim'],
+        k=config['k'],
+        tau=config['tau']
+    ).to(device)
+
+    # Optional action predictor
+    if config.get('use_action_predictor', False):
+        action_predictor = nn.Linear(config['hidden_dim'], config['n_actions']).to(device)
+        optimizer = torch.optim.Adam(
+            list(model.parameters()) + list(action_predictor.parameters()),
+            lr=config['lr']
+        )
+    else:
+        action_predictor = None
+        optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
+
+    # Split data into train/val
+    n_samples = len(features)
+    val_ratio = config.get('val_ratio', 0.1)
+    n_val = int(n_samples * val_ratio)
+    n_train = n_samples - n_val
+
+    # Random split with fixed seed
+    indices = torch.randperm(n_samples, generator=torch.Generator().manual_seed(seed))
+    train_indices = indices[:n_train]
+    val_indices = indices[n_train:]
+
+    train_features = features[train_indices]
+    train_actions = actions[train_indices]
+    val_features = features[val_indices]
+    val_actions = actions[val_indices]
+
+    print(f"Train samples: {n_train}, Val samples: {n_val}")
+
+    # Create dataloaders
+    train_dataset = TensorDataset(train_features, train_actions)
+    val_dataset = TensorDataset(val_features, val_actions)
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['batch_size'],
+        shuffle=True,
+        generator=generator,
+        worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id)
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['batch_size'],
+        shuffle=False
+    )
+
+    # Loss weights
+    alpha = config.get('alpha', 1.0)  # Reconstruction
+    beta = config.get('beta', 0.0)    # Action prediction
+    gamma = config.get('gamma', 0.0)  # Action-concept diversity
+
+    print(f"\nTraining for {config['n_epochs']} epochs...")
+    print(f"Loss weights: α(recon)={alpha}, β(action)={beta}, γ(diversity)={gamma}")
+
+    # Track best model
+    best_val_loss = float('inf')
+    best_val_acc = 0.0
+    best_epoch = 0
+    patience = config.get('patience', 50)
+    patience_counter = 0
+
+    for epoch in range(config['n_epochs']):
+        # Training phase
+        model.train()
+        if action_predictor is not None:
+            action_predictor.train()
+
+        total_loss = 0
+        total_recon = 0
+        total_action = 0
+        total_correct = 0
+        total_samples = 0
+
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['n_epochs']}")
+
+        for batch_features, batch_actions in pbar:
+            batch_features = batch_features.to(device)
+            batch_actions = batch_actions.to(device)
+
+            # Forward
+            x_recon, concepts = model(batch_features)
+
+            # Reconstruction loss
+            recon_loss = F.mse_loss(x_recon, batch_features)
+
+            # Total loss
+            loss = alpha * recon_loss
+
+            # Optional action loss
+            if action_predictor is not None:
+                action_logits = action_predictor(concepts)
+                action_loss = F.cross_entropy(action_logits, batch_actions)
+                loss += beta * action_loss
+
+                pred = action_logits.argmax(dim=-1)
+                total_correct += (pred == batch_actions).sum().item()
+                total_action += action_loss.item()
+
+                # Action-concept diversity loss: encourage different actions to use different concepts
+                if gamma > 0 and len(torch.unique(batch_actions)) > 1:
+                    # Compute mean concept activation for each action in batch
+                    action_concept_patterns = []
+                    unique_actions = torch.unique(batch_actions)
+
+                    for action in unique_actions:
+                        action_mask = batch_actions == action
+                        if action_mask.sum() > 0:
+                            # Mean concept activation for this action
+                            action_concepts = concepts[action_mask].mean(dim=0)
+                            action_concept_patterns.append(action_concepts)
+
+                    if len(action_concept_patterns) > 1:
+                        # Stack into matrix: [n_actions_in_batch, hidden_dim]
+                        action_patterns = torch.stack(action_concept_patterns)
+
+                        # Normalize to unit vectors
+                        action_patterns_norm = F.normalize(action_patterns, p=2, dim=1)
+
+                        # Compute pairwise cosine similarity
+                        similarity = torch.mm(action_patterns_norm, action_patterns_norm.t())
+
+                        # Penalize high similarity (encourage diversity)
+                        # Extract off-diagonal elements (don't penalize self-similarity)
+                        mask = ~torch.eye(similarity.size(0), dtype=torch.bool, device=device)
+                        diversity_loss = similarity[mask].abs().mean()
+
+                        loss += gamma * diversity_loss
+            else:
+                action_loss = torch.tensor(0.0)
+
+            # Backward
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            # Track
+            total_loss += loss.item()
+            total_recon += recon_loss.item()
+            total_samples += len(batch_actions)
+
+            # Progress
+            if action_predictor is not None:
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'recon': f'{recon_loss.item():.4f}',
+                    'action': f'{action_loss.item():.4f}',
+                    'acc': f'{100.0 * total_correct / total_samples:.1f}%'
+                })
+            else:
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'recon': f'{recon_loss.item():.4f}'
+                })
+
+        # Epoch summary (training)
+        train_loss = total_loss / len(train_loader)
+        train_recon = total_recon / len(train_loader)
+        train_acc = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
+
+        print(f"Epoch {epoch+1} [TRAIN]:")
+        print(f"  Loss: {train_loss:.4f}, Recon: {train_recon:.4f}", end="")
+        if action_predictor is not None:
+            train_action = total_action / len(train_loader)
+            print(f", Action: {train_action:.4f}, Acc: {train_acc:.2f}%")
+        else:
+            print()
+
+        # Validation phase
+        model.eval()
+        if action_predictor is not None:
+            action_predictor.eval()
+
+        val_loss = 0
+        val_recon = 0
+        val_action = 0
+        val_correct = 0
+        val_samples = 0
+
+        with torch.no_grad():
+            for batch_features, batch_actions in val_loader:
+                batch_features = batch_features.to(device)
+                batch_actions = batch_actions.to(device)
+
+                # Forward
+                x_recon, concepts = model(batch_features)
+                recon_loss = F.mse_loss(x_recon, batch_features)
+                loss = alpha * recon_loss
+
+                val_recon += recon_loss.item()
+                val_loss += loss.item()
+                val_samples += len(batch_actions)
+
+                if action_predictor is not None:
+                    action_logits = action_predictor(concepts)
+                    action_loss = F.cross_entropy(action_logits, batch_actions)
+                    loss += beta * action_loss
+
+                    pred = action_logits.argmax(dim=-1)
+                    val_correct += (pred == batch_actions).sum().item()
+                    val_action += action_loss.item()
+
+        # Validation summary
+        val_loss = val_loss / len(val_loader)
+        val_recon = val_recon / len(val_loader)
+        val_acc = 100.0 * val_correct / val_samples if val_samples > 0 else 0.0
+
+        print(f"Epoch {epoch+1} [VAL]:")
+        print(f"  Loss: {val_loss:.4f}, Recon: {val_recon:.4f}", end="")
+        if action_predictor is not None:
+            val_action = val_action / len(val_loader)
+            print(f", Action: {val_action:.4f}, Acc: {val_acc:.2f}%")
+        else:
+            print()
+
+        # Model selection based on validation
+        metric = val_acc if action_predictor is not None else -val_loss
+
+        if metric > best_val_acc:
+            best_val_acc = metric
+            best_val_loss = val_loss
+            best_epoch = epoch + 1
+            patience_counter = 0
+
+            # Save best model
+            best_model_state = {
+                'model': model.state_dict(),
+                'action_predictor': action_predictor.state_dict() if action_predictor else None,
+                'epoch': best_epoch,
+                'val_loss': best_val_loss,
+                'val_acc': best_val_acc
+            }
+            print(f"  ★ Best model (epoch {best_epoch}, val_acc={best_val_acc:.2f}%)")
+        else:
+            patience_counter += 1
+
+        # Early stopping
+        if patience_counter >= patience:
+            print(f"\nEarly stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
+            break
+
+        # Sparsity and interpretability analysis
+        if (epoch + 1) % 10 == 0:
+            with torch.no_grad():
+                sample_features = features[:1000].to(device)
+                sample_actions = actions[:1000].to(device)
+                _, sample_concepts = model(sample_features)
+
+                # Sparsity stats
+                active_rate = (sample_concepts > 0).float().mean(dim=0)
+                n_active = (active_rate > 0.01).sum().item()
+                avg_sparsity = (sample_concepts > 0).float().mean().item()
+                n_saturated = (active_rate > 0.9).sum().item()
+
+                print(f"  Active concepts: {n_active}/{config['hidden_dim']}")
+                print(f"  Saturated (>90%): {n_saturated}")
+                print(f"  Avg sparsity: {100 * avg_sparsity:.1f}%")
+
+                # Quick linear probe to measure interpretability
+                if action_predictor is None:
+                    # Fit quick linear probe to see if concepts are informative
+                    probe = torch.nn.Linear(config['hidden_dim'], config['n_actions']).to(device)
+                    probe_optimizer = torch.optim.Adam(probe.parameters(), lr=0.01)
+
+                    for _ in range(50):  # Quick 50 step training
+                        logits = probe(sample_concepts)
+                        loss = F.cross_entropy(logits, sample_actions)
+                        probe_optimizer.zero_grad()
+                        loss.backward()
+                        probe_optimizer.step()
+
+                    # Test accuracy
+                    with torch.no_grad():
+                        logits = probe(sample_concepts)
+                        pred = logits.argmax(dim=-1)
+                        probe_acc = (pred == sample_actions).float().mean().item()
+                        print(f"  Linear probe acc: {100.0 * probe_acc:.2f}%")
+
+    # Restore best model
+    print(f"\nTraining complete. Restoring best model from epoch {best_epoch}")
+    print(f"Best val loss: {best_val_loss:.4f}, Best val acc: {best_val_acc:.2f}%")
+
+    if 'best_model_state' in locals():
+        model.load_state_dict(best_model_state['model'])
+        if action_predictor is not None and best_model_state['action_predictor'] is not None:
+            action_predictor.load_state_dict(best_model_state['action_predictor'])
+
+    if action_predictor is not None:
+        return model, action_predictor
+    return model, None
+
+
+def save_model(model, action_predictor, features, actions, config, save_dir='./concept_models'):
+    """Save model"""
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Save SAE
+    torch.save({
+        'encoder_weight': model.encoder.weight.data,
+        'encoder_bias': model.encoder.bias.data,
+        'decoder_weight': model.decoder.weight.data,
+        'decoder_bias': model.decoder.bias.data,
+        'config': config
+    }, os.path.join(save_dir, 'sae.pt'))
+
+    # Save action predictor if exists
+    if action_predictor is not None:
+        torch.save({
+            'weight': action_predictor.weight.data,
+            'bias': action_predictor.bias.data
+        }, os.path.join(save_dir, 'action_predictor.pt'))
+
+    # Save sample data
+    torch.save({
+        'features': features[:1000],
+        'actions': actions[:1000]
+    }, os.path.join(save_dir, 'sample_data.pt'))
+
+    print(f"\nModel saved to {save_dir}")
+
+
+def analyze_concepts(model, features):
+    """Analyze learned concepts"""
+    device = next(model.parameters()).device
+    features = features.to(device)
+
+    print("\n" + "="*60)
+    print("CONCEPT ANALYSIS")
+    print("="*60)
+
+    with torch.no_grad():
+        _, concepts = model(features)
+
+        active_mask = concepts > 0
+        active_rate = active_mask.float().mean(dim=0)
+
+        n_active = (active_rate > 0.01).sum().item()
+        n_dead = (active_rate < 0.001).sum().item()
+
+        print(f"\nActive concepts (>1%): {n_active}/{concepts.shape[1]}")
+        print(f"Dead concepts (<0.1%): {n_dead}/{concepts.shape[1]}")
+        print(f"Avg sparsity: {active_mask.float().mean().item()*100:.1f}%")
+
+        # Top concepts
+        print(f"\nTop 10 most active concepts:")
+        top_indices = active_rate.argsort(descending=True)[:10]
+        for rank, idx in enumerate(top_indices):
+            print(f"  {rank+1}. Concept {idx.item():3d}: {active_rate[idx].item()*100:5.1f}% active")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, default='ppo_doorkey_5x5.zip')
+    parser.add_argument('--env_name', type=str, default='MiniGrid-DoorKey-5x5-v0')
+    parser.add_argument('--n_episodes', type=int, default=800)
+    parser.add_argument('--hidden_dim', type=int, default=32)
+    parser.add_argument('--k', type=int, default=10)
+    parser.add_argument('--tau', type=float, default=1.0)
+    parser.add_argument('--n_epochs', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--alpha', type=float, default=1.0, help='Reconstruction loss weight')
+    parser.add_argument('--beta', type=float, default=0.0, help='Action loss weight (0=no action predictor)')
+    parser.add_argument('--gamma', type=float, default=0.0, help='Action-concept diversity loss weight')
+    parser.add_argument('--val_ratio', type=float, default=0.1, help='Validation set ratio')
+    parser.add_argument('--patience', type=int, default=100, help='Early stopping patience')
+    parser.add_argument('--save_dir', type=str, default='./concept_models')
+    parser.add_argument('--seed', type=int, default=42)
+
+    args = parser.parse_args()
+
+    # Set seeds for data collection
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    # Collect data
+    features, actions = collect_rollout_data(args.model_path, args.env_name, args.n_episodes, args.seed)
+
+    # Config
+    config = {
+        'input_dim': 128,
+        'hidden_dim': args.hidden_dim,
+        'k': args.k,
+        'tau': args.tau,
+        'n_actions': 7,
+        'n_epochs': args.n_epochs,
+        'batch_size': args.batch_size,
+        'lr': args.lr,
+        'alpha': args.alpha,
+        'beta': args.beta,
+        'gamma': args.gamma,
+        'val_ratio': args.val_ratio,
+        'patience': args.patience,
+        'use_action_predictor': args.beta > 0,
+        'env_name': args.env_name,
+        'model_path': args.model_path,
+        'seed': args.seed
+    }
+
+    # Train
+    model, action_predictor = train_sae(features, actions, config)
+
+    # Analyze
+    analyze_concepts(model, features)
+
+    # Save
+    save_model(model, action_predictor, features, actions, config, args.save_dir)
+
+    print("\n" + "="*60)
+    print("DONE!")
+    print("="*60)
+
+
+if __name__ == '__main__':
+    main()
