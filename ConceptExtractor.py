@@ -194,9 +194,10 @@ def train_sae(features, actions, config):
     # Loss weights
     alpha = config.get('alpha', 1.0)  # Reconstruction
     beta = config.get('beta', 0.0)    # Action prediction
+    gamma = config.get('gamma', 0.0)  # Action-concept diversity
 
     print(f"\nTraining for {config['n_epochs']} epochs...")
-    print(f"Loss weights: α(recon)={alpha}, β(action)={beta}")
+    print(f"Loss weights: α(recon)={alpha}, β(action)={beta}, γ(diversity)={gamma}")
 
     for epoch in range(config['n_epochs']):
         total_loss = 0
@@ -229,6 +230,36 @@ def train_sae(features, actions, config):
                 pred = action_logits.argmax(dim=-1)
                 total_correct += (pred == batch_actions).sum().item()
                 total_action += action_loss.item()
+
+                # Action-concept diversity loss: encourage different actions to use different concepts
+                if gamma > 0 and len(torch.unique(batch_actions)) > 1:
+                    # Compute mean concept activation for each action in batch
+                    action_concept_patterns = []
+                    unique_actions = torch.unique(batch_actions)
+
+                    for action in unique_actions:
+                        action_mask = batch_actions == action
+                        if action_mask.sum() > 0:
+                            # Mean concept activation for this action
+                            action_concepts = concepts[action_mask].mean(dim=0)
+                            action_concept_patterns.append(action_concepts)
+
+                    if len(action_concept_patterns) > 1:
+                        # Stack into matrix: [n_actions_in_batch, hidden_dim]
+                        action_patterns = torch.stack(action_concept_patterns)
+
+                        # Normalize to unit vectors
+                        action_patterns_norm = F.normalize(action_patterns, p=2, dim=1)
+
+                        # Compute pairwise cosine similarity
+                        similarity = torch.mm(action_patterns_norm, action_patterns_norm.t())
+
+                        # Penalize high similarity (encourage diversity)
+                        # Extract off-diagonal elements (don't penalize self-similarity)
+                        mask = ~torch.eye(similarity.size(0), dtype=torch.bool, device=device)
+                        diversity_loss = similarity[mask].abs().mean()
+
+                        loss += gamma * diversity_loss
             else:
                 action_loss = torch.tensor(0.0)
 
@@ -404,6 +435,7 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--alpha', type=float, default=1.0, help='Reconstruction loss weight')
     parser.add_argument('--beta', type=float, default=0.0, help='Action loss weight (0=no action predictor)')
+    parser.add_argument('--gamma', type=float, default=0.0, help='Action-concept diversity loss weight')
     parser.add_argument('--save_dir', type=str, default='./concept_models')
     parser.add_argument('--seed', type=int, default=42)
 
@@ -429,6 +461,7 @@ def main():
         'lr': args.lr,
         'alpha': args.alpha,
         'beta': args.beta,
+        'gamma': args.gamma,
         'use_action_predictor': args.beta > 0,
         'env_name': args.env_name,
         'model_path': args.model_path,
