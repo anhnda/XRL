@@ -240,9 +240,33 @@ def train_sae(features, actions, config):
         if action_predictor is not None:
             print(f"  Action Loss: {total_action / len(dataloader):.4f}")
             print(f"  Action Acc: {100.0 * total_correct / total_samples:.2f}%")
+
+            # Per-action accuracy (every 20 epochs)
+            if (epoch + 1) % 20 == 0:
+                with torch.no_grad():
+                    all_preds = []
+                    all_targets = []
+                    for batch_features, batch_actions in dataloader:
+                        batch_features = batch_features.to(device)
+                        batch_actions = batch_actions.to(device)
+                        _, concepts = model(batch_features)
+                        logits = action_predictor(concepts)
+                        preds = logits.argmax(dim=-1)
+                        all_preds.append(preds.cpu())
+                        all_targets.append(batch_actions.cpu())
+
+                    all_preds = torch.cat(all_preds)
+                    all_targets = torch.cat(all_targets)
+
+                    action_names = ['TurnLeft', 'TurnRight', 'Forward', 'Pickup', 'Drop', 'Toggle', 'Done']
+                    print(f"  Per-action accuracy:")
+                    for a in range(config['n_actions']):
+                        mask = all_targets == a
+                        if mask.sum() > 0:
+                            acc = (all_preds[mask] == a).float().mean().item()
+                            count = mask.sum().item()
+                            print(f"    {action_names[a]:10s}: {acc*100:5.1f}% ({count:5d} samples)")
         else:
-            # Even without action predictor, show what accuracy WOULD be
-            # Train a simple linear probe on concepts to estimate interpretability
             print(f"  Action Acc: (no action predictor)")
 
         # Sparsity and interpretability analysis
