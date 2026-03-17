@@ -260,6 +260,10 @@ def train_concept_model(features, actions, config):
     print(f"\nTraining for {config['n_epochs']} epochs...")
     print(f"Loss weights: α(recon)={alpha}, β(action)={beta}, γ(diversity)={gamma}")
 
+    # Track global activation rates with exponential moving average
+    global_activation_rate = None
+    ema_momentum = 0.99  # Slow decay to track long-term patterns
+
     for epoch in range(config['n_epochs']):
         total_loss = 0
         total_recon_loss = 0
@@ -281,14 +285,27 @@ def train_concept_model(features, actions, config):
             action_loss = F.cross_entropy(action_logits, batch_actions)
 
             # Diversity loss: penalize concepts that are always active (saturation)
-            concept_usage = (concepts > 0).float().mean(dim=0)  # [hidden_dim]
-            # Target: with k=10 and hidden_dim=20, expect ~50% activation per concept
+            concept_usage = (concepts > 0).float().mean(dim=0)  # [hidden_dim] - batch stats
+
+            # Update global activation rate (exponential moving average)
+            if global_activation_rate is None:
+                global_activation_rate = concept_usage.detach()
+            else:
+                global_activation_rate = ema_momentum * global_activation_rate + (1 - ema_momentum) * concept_usage.detach()
+
+            # Use global activation rates for diversity loss (detach to avoid backprop through EMA)
+            global_usage = global_activation_rate.detach()
+
+            # Target: with k and hidden_dim, expect ~k/hidden_dim activation per concept
             target_rate = config['k'] / config['hidden_dim']
             # Penalize deviation from target (both over and under)
-            deviation = torch.abs(concept_usage - target_rate).mean()
+            deviation = torch.abs(global_usage - target_rate).mean()
             # Extra penalty for saturation (>70%)
-            saturation_penalty = (F.relu(concept_usage - 0.7) ** 2).mean()
-            diversity_loss = deviation + 2.0 * saturation_penalty
+            saturation_penalty = (F.relu(global_usage - 0.7) ** 2).mean()
+            # Penalty for dead neurons (<5%)
+            dead_penalty = (F.relu(0.05 - global_usage) ** 2).mean()
+
+            diversity_loss = deviation + 5.0 * saturation_penalty + 2.0 * dead_penalty
 
             # Multi-objective loss
             loss = alpha * recon_loss + beta * action_loss + gamma * diversity_loss
@@ -331,6 +348,12 @@ def train_concept_model(features, actions, config):
         print(f"  Action Loss: {avg_action:.4f}")
         print(f"  Diversity Loss: {avg_diversity:.4f}")
         print(f"  Action Accuracy: {accuracy:.2f}%")
+
+        # Monitor saturation in global activation rates
+        if global_activation_rate is not None:
+            n_saturated = (global_activation_rate > 0.8).sum().item()
+            n_dead = (global_activation_rate < 0.05).sum().item()
+            print(f"  Global stats: {n_saturated} saturated (>80%), {n_dead} dead (<5%)")
 
         # Analyze sparsity
         with torch.no_grad():
