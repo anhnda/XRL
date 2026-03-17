@@ -184,6 +184,30 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
         torch.backends.cudnn.benchmark = False
     print(f"Random seed set to: {seed}")
 
+    # Split data into train/val
+    n_samples = len(features)
+    val_ratio = config.get('val_ratio', 0.1)
+    n_val = int(n_samples * val_ratio)
+    n_train = n_samples - n_val
+
+    indices = torch.randperm(n_samples, generator=torch.Generator().manual_seed(seed))
+    train_indices = indices[:n_train]
+    val_indices = indices[n_train:]
+
+    train_features = features[train_indices]
+    train_actions = actions[train_indices]
+    train_next_features = next_features[train_indices]
+    train_next_actions = next_actions[train_indices]
+    train_episode_mask = episode_mask[train_indices]
+
+    val_features = features[val_indices]
+    val_actions = actions[val_indices]
+    val_next_features = next_features[val_indices]
+    val_next_actions = next_actions[val_indices]
+    val_episode_mask = episode_mask[val_indices]
+
+    print(f"\nDataset split: {n_train} train, {n_val} val ({val_ratio*100:.0f}% validation)")
+
     # Create model
     model = SparseAutoencoder(
         input_dim=config['input_dim'],
@@ -211,15 +235,24 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
         optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
 
     # Dataset with deterministic DataLoader (includes sequential data)
-    dataset = TensorDataset(features, actions, next_features, next_actions, episode_mask)
+    train_dataset = TensorDataset(train_features, train_actions, train_next_features, train_next_actions, train_episode_mask)
+    val_dataset = TensorDataset(val_features, val_actions, val_next_features, val_next_actions, val_episode_mask)
+
     generator = torch.Generator()
     generator.manual_seed(seed)
-    dataloader = DataLoader(
-        dataset,
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=config['batch_size'],
         shuffle=True,
         generator=generator,
         worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id)
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['batch_size'],
+        shuffle=False
     )
 
     # Loss weights
@@ -231,18 +264,34 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
     zeta = config.get('zeta', 0.1)  # Future prediction
     eta = config.get('eta', 0.05)  # Augmentation invariance
 
+    # Track best model
+    best_val_loss = float('inf')
+    best_val_acc = 0.0
+    best_epoch = 0
+    patience = config.get('patience', 50)
+    patience_counter = 0
+    best_model_state = None
+
     print(f"\nTraining for {config['n_epochs']} epochs...")
     print(f"Loss weights: α(recon)={alpha}, β(action)={beta}, γ(diversity)={gamma}, δ(L1)={delta}")
     print(f"              ε(temporal)={epsilon}, ζ(future)={zeta}, η(aug)={eta}")
+    print(f"Early stopping patience: {patience}")
 
     for epoch in range(config['n_epochs']):
+        # === TRAINING ===
+        model.train()
+        if action_predictor is not None:
+            action_predictor.train()
+            if future_predictor is not None:
+                future_predictor.train()
+
         total_loss = 0
         total_recon = 0
         total_action = 0
         total_correct = 0
         total_samples = 0
 
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config['n_epochs']}")
+        pbar = tqdm(train_loader, desc=f"[TRAIN] Epoch {epoch+1}/{config['n_epochs']}")
 
         for batch_features, batch_actions, batch_next_features, batch_next_actions, batch_mask in pbar:
             batch_features = batch_features.to(device)
@@ -365,10 +414,10 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
                 })
 
         # Epoch summary
-        print(f"Epoch {epoch+1}:")
-        print(f"  Recon Loss: {total_recon / len(dataloader):.4f}")
+        print(f"\n[TRAIN] Epoch {epoch+1}:")
+        print(f"  Recon Loss: {total_recon / len(train_loader):.4f}")
         if action_predictor is not None:
-            print(f"  Action Loss: {total_action / len(dataloader):.4f}")
+            print(f"  Action Loss: {total_action / len(train_loader):.4f}")
             print(f"  Action Acc: {100.0 * total_correct / total_samples:.2f}%")
 
             # Per-action accuracy (every 20 epochs)
@@ -376,7 +425,7 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
                 with torch.no_grad():
                     all_preds = []
                     all_targets = []
-                    for batch_data in dataloader:
+                    for batch_data in train_loader:
                         batch_features = batch_data[0].to(device)
                         batch_actions = batch_data[1].to(device)
                         _, concepts = model(batch_features)
@@ -389,7 +438,7 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
                     all_targets = torch.cat(all_targets)
 
                     action_names = ['TurnLeft', 'TurnRight', 'Forward', 'Pickup', 'Drop', 'Toggle', 'Done']
-                    print(f"  Per-action accuracy:")
+                    print(f"  Per-action accuracy (train):")
                     for a in range(config['n_actions']):
                         mask = all_targets == a
                         if mask.sum() > 0:
@@ -399,11 +448,129 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
         else:
             print(f"  Action Acc: (no action predictor)")
 
+        # === VALIDATION ===
+        model.eval()
+        if action_predictor is not None:
+            action_predictor.eval()
+            if future_predictor is not None:
+                future_predictor.eval()
+
+        val_loss = 0
+        val_recon = 0
+        val_action = 0
+        val_correct = 0
+        val_samples = 0
+
+        with torch.no_grad():
+            for batch_features, batch_actions, batch_next_features, batch_next_actions, batch_mask in val_loader:
+                batch_features = batch_features.to(device)
+                batch_actions = batch_actions.to(device)
+                batch_next_features = batch_next_features.to(device)
+                batch_next_actions = batch_next_actions.to(device)
+                batch_mask = batch_mask.to(device)
+
+                # Forward
+                x_recon, concepts = model(batch_features)
+
+                # Reconstruction loss
+                recon_loss = F.mse_loss(x_recon, batch_features)
+
+                # Total loss
+                loss = alpha * recon_loss
+
+                # Temporal consistency loss
+                if epsilon > 0:
+                    _, next_concepts = model(batch_next_features)
+                    temporal_loss = (batch_mask * (concepts - next_concepts).abs().sum(dim=1)).mean()
+                    loss += epsilon * temporal_loss
+
+                # Augmentation invariance loss
+                if eta > 0:
+                    noise = torch.randn_like(batch_features) * 0.01
+                    aug_features = batch_features + noise
+                    _, aug_concepts = model(aug_features)
+                    aug_loss = (concepts - aug_concepts).abs().sum(dim=1).mean()
+                    loss += eta * aug_loss
+
+                # Optional action loss
+                if action_predictor is not None:
+                    action_logits = action_predictor(concepts)
+                    action_loss = F.cross_entropy(action_logits, batch_actions)
+                    loss += beta * action_loss
+
+                    # L1 penalty
+                    if delta > 0:
+                        l1_penalty = action_predictor.weight.abs().mean()
+                        loss += delta * l1_penalty
+
+                    pred = action_logits.argmax(dim=-1)
+                    val_correct += (pred == batch_actions).sum().item()
+                    val_action += action_loss.item()
+
+                    # Future prediction loss
+                    if zeta > 0 and future_predictor is not None:
+                        future_logits = future_predictor(concepts)
+                        future_loss = (batch_mask.squeeze() * F.cross_entropy(
+                            future_logits, batch_next_actions, reduction='none'
+                        )).mean()
+                        loss += zeta * future_loss
+
+                val_loss += loss.item()
+                val_recon += recon_loss.item()
+                val_samples += len(batch_actions)
+
+        print(f"\n[VAL] Epoch {epoch+1}:")
+        print(f"  Recon Loss: {val_recon / len(val_loader):.4f}")
+        if action_predictor is not None:
+            val_acc = 100.0 * val_correct / val_samples
+            print(f"  Action Loss: {val_action / len(val_loader):.4f}")
+            print(f"  Action Acc: {val_acc:.2f}%")
+
+            # Model selection based on validation accuracy
+            metric = val_acc
+            if metric > best_val_acc:
+                best_val_acc = metric
+                best_val_loss = val_loss / len(val_loader)
+                best_epoch = epoch + 1
+                patience_counter = 0
+                best_model_state = {
+                    'model': model.state_dict(),
+                    'action_predictor': action_predictor.state_dict(),
+                    'future_predictor': future_predictor.state_dict() if future_predictor else None,
+                }
+                print(f"  ✓ Best model (acc={best_val_acc:.2f}%)")
+            else:
+                patience_counter += 1
+                print(f"  Patience: {patience_counter}/{patience}")
+                if patience_counter >= patience:
+                    print(f"\n⚠ Early stopping at epoch {epoch+1}")
+                    break
+        else:
+            # No action predictor - use validation loss
+            val_loss_avg = val_loss / len(val_loader)
+            print(f"  Action Acc: (no action predictor)")
+            if val_loss_avg < best_val_loss:
+                best_val_loss = val_loss_avg
+                best_epoch = epoch + 1
+                patience_counter = 0
+                best_model_state = {
+                    'model': model.state_dict(),
+                    'action_predictor': None,
+                    'future_predictor': None,
+                }
+                print(f"  ✓ Best model (loss={best_val_loss:.4f})")
+            else:
+                patience_counter += 1
+                print(f"  Patience: {patience_counter}/{patience}")
+                if patience_counter >= patience:
+                    print(f"\n⚠ Early stopping at epoch {epoch+1}")
+                    break
+
         # Sparsity and interpretability analysis
         if (epoch + 1) % 10 == 0:
             with torch.no_grad():
-                sample_features = features[:1000].to(device)
-                sample_actions = actions[:1000].to(device)
+                sample_features = train_features[:1000].to(device)
+                sample_actions = train_actions[:1000].to(device)
                 _, sample_concepts = model(sample_features)
 
                 # Sparsity stats
@@ -412,7 +579,7 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
                 avg_sparsity = (sample_concepts > 0).float().mean().item()
                 n_saturated = (active_rate > 0.9).sum().item()
 
-                print(f"  Active concepts: {n_active}/{config['hidden_dim']}")
+                print(f"\n  Active concepts: {n_active}/{config['hidden_dim']}")
                 print(f"  Saturated (>90%): {n_saturated}")
                 print(f"  Avg sparsity: {100 * avg_sparsity:.1f}%")
 
@@ -435,6 +602,21 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
                         pred = logits.argmax(dim=-1)
                         probe_acc = (pred == sample_actions).float().mean().item()
                         print(f"  Linear probe acc: {100.0 * probe_acc:.2f}%")
+
+    # Restore best model
+    if best_model_state is not None:
+        print(f"\n{'='*60}")
+        print(f"Restoring best model from epoch {best_epoch}")
+        if action_predictor is not None:
+            print(f"Best validation accuracy: {best_val_acc:.2f}%")
+        else:
+            print(f"Best validation loss: {best_val_loss:.4f}")
+        print(f"{'='*60}")
+        model.load_state_dict(best_model_state['model'])
+        if action_predictor is not None and best_model_state['action_predictor'] is not None:
+            action_predictor.load_state_dict(best_model_state['action_predictor'])
+        if future_predictor is not None and best_model_state['future_predictor'] is not None:
+            future_predictor.load_state_dict(best_model_state['future_predictor'])
 
     if action_predictor is not None:
         return model, action_predictor
@@ -519,6 +701,8 @@ def main():
     parser.add_argument('--eta', type=float, default=0.05, help='Augmentation invariance loss weight')
     parser.add_argument('--save_dir', type=str, default='./concept_models')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--val_ratio', type=float, default=0.1, help='Validation set ratio (0.0-1.0)')
+    parser.add_argument('--patience', type=int, default=50, help='Early stopping patience')
 
     args = parser.parse_args()
 
@@ -552,7 +736,9 @@ def main():
         'use_action_predictor': args.beta > 0,
         'env_name': args.env_name,
         'model_path': args.model_path,
-        'seed': args.seed
+        'seed': args.seed,
+        'val_ratio': args.val_ratio,
+        'patience': args.patience
     }
 
     # Train
