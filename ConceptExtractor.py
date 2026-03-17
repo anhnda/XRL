@@ -32,11 +32,9 @@ class SparseAutoencoder(nn.Module):
         self.encoder = nn.Linear(input_dim, hidden_dim)
         self.decoder = nn.Linear(hidden_dim, input_dim)
 
-        # Initialize
-        #nn.init.xavier_uniform_(self.encoder.weight)
-        #nn.init.xavier_uniform_(self.decoder.weight)
-        nn.init.zeros_(self.encoder.weight)
-        nn.init.zeros_(self.decoder.weight)
+        # Initialize with proper scaling
+        nn.init.xavier_uniform_(self.encoder.weight, gain=1.0)
+        nn.init.xavier_uniform_(self.decoder.weight, gain=1.0)
         nn.init.zeros_(self.encoder.bias)
         nn.init.zeros_(self.decoder.bias)
 
@@ -173,13 +171,24 @@ def train_sae(features, actions, config):
     # Optional action predictor
     if config.get('use_action_predictor', False):
         action_predictor = nn.Linear(config['hidden_dim'], config['n_actions']).to(device)
-        optimizer = torch.optim.Adam(
+        # Better initialization for action predictor
+        nn.init.xavier_uniform_(action_predictor.weight, gain=0.1)
+        nn.init.zeros_(action_predictor.bias)
+
+        # Use AdamW with weight decay for better generalization
+        optimizer = torch.optim.AdamW(
             list(model.parameters()) + list(action_predictor.parameters()),
-            lr=config['lr']
+            lr=config['lr'],
+            weight_decay=1e-4,
+            betas=(0.9, 0.999)
         )
     else:
         action_predictor = None
-        optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config['lr'],
+            weight_decay=1e-4
+        )
 
     # Dataset with deterministic DataLoader
     dataset = TensorDataset(features, actions)
@@ -198,10 +207,25 @@ def train_sae(features, actions, config):
     beta = config.get('beta', 0.0)    # Action prediction
     gamma = config.get('gamma', 0.0)  # Action-concept diversity
 
+    # Learning rate scheduler: warmup + cosine decay
+    warmup_epochs = min(10, config['n_epochs'] // 10)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=config['n_epochs'] - warmup_epochs,
+        eta_min=config['lr'] * 0.01
+    )
+
     print(f"\nTraining for {config['n_epochs']} epochs...")
     print(f"Loss weights: α(recon)={alpha}, β(action)={beta}, γ(diversity)={gamma}")
+    print(f"LR warmup: {warmup_epochs} epochs, then cosine decay to {config['lr']*0.01:.2e}")
 
     for epoch in range(config['n_epochs']):
+        # Learning rate warmup
+        if epoch < warmup_epochs:
+            warmup_lr = config['lr'] * (epoch + 1) / warmup_epochs
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = warmup_lr
+
         total_loss = 0
         total_recon = 0
         total_action = 0
@@ -361,6 +385,15 @@ def train_sae(features, actions, config):
                         probe_acc = (pred == sample_actions).float().mean().item()
                         print(f"  Linear probe acc: {100.0 * probe_acc:.2f}%")
 
+        # Update learning rate (after warmup)
+        if epoch >= warmup_epochs:
+            scheduler.step()
+
+        # Log current learning rate (every 10 epochs)
+        if (epoch + 1) % 10 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"  Learning rate: {current_lr:.2e}")
+
     if action_predictor is not None:
         return model, action_predictor
     return model, None
@@ -432,9 +465,9 @@ def main():
     parser.add_argument('--hidden_dim', type=int, default=32)
     parser.add_argument('--k', type=int, default=10)
     parser.add_argument('--tau', type=float, default=1.0)
-    parser.add_argument('--n_epochs', type=int, default=100)
+    parser.add_argument('--n_epochs', type=int, default=150)
     parser.add_argument('--batch_size', type=int, default=256)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=3e-3)
     parser.add_argument('--alpha', type=float, default=1.0, help='Reconstruction loss weight')
     parser.add_argument('--beta', type=float, default=0.0, help='Action loss weight (0=no action predictor)')
     parser.add_argument('--gamma', type=float, default=0.0, help='Action-concept diversity loss weight')
