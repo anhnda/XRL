@@ -268,7 +268,7 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
     best_val_loss = float('inf')
     best_val_acc = 0.0
     best_epoch = 0
-    patience = config.get('patience', 50)
+    patience = config.get('patience', 100)
     patience_counter = 0
     best_model_state = None
 
