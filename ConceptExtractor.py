@@ -282,11 +282,13 @@ def train_concept_model(features, actions, config):
 
             # Diversity loss: penalize concepts that are always active (saturation)
             concept_usage = (concepts > 0).float().mean(dim=0)  # [hidden_dim]
-            # Penalize high activation rates (>80%) directly
-            saturation_penalty = F.relu(concept_usage - 0.8).mean()
-            # Also encourage variance across concepts
-            variance_bonus = -torch.std(concept_usage)
-            diversity_loss = saturation_penalty + 0.5 * variance_bonus
+            # Target: with k=10 and hidden_dim=20, expect ~50% activation per concept
+            target_rate = config['k'] / config['hidden_dim']
+            # Penalize deviation from target (both over and under)
+            deviation = torch.abs(concept_usage - target_rate).mean()
+            # Extra penalty for saturation (>70%)
+            saturation_penalty = (F.relu(concept_usage - 0.7) ** 2).mean()
+            diversity_loss = deviation + 2.0 * saturation_penalty
 
             # Multi-objective loss
             loss = alpha * recon_loss + beta * action_loss + gamma * diversity_loss
