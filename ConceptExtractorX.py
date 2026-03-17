@@ -33,10 +33,10 @@ class SparseAutoencoder(nn.Module):
         self.decoder = nn.Linear(hidden_dim, input_dim)
 
         # Initialize
-        #nn.init.xavier_uniform_(self.encoder.weight)
-        #nn.init.xavier_uniform_(self.decoder.weight)
-        nn.init.zeros_(self.encoder.weight)
-        nn.init.zeros_(self.decoder.weight)
+        nn.init.xavier_uniform_(self.encoder.weight)
+        nn.init.xavier_uniform_(self.decoder.weight)
+        # nn.init.zeros_(self.encoder.weight)
+        # nn.init.zeros_(self.decoder.weight)
         nn.init.zeros_(self.encoder.bias)
         nn.init.zeros_(self.decoder.bias)
 
