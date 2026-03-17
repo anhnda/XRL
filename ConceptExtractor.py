@@ -49,6 +49,9 @@ class SparseAutoencoder(nn.Module):
             # Gumbel-Softmax mode: encoder outputs logits
             logits = self.encoder(x)  # Raw logits, no ReLU
 
+            # Clip logits to prevent saturation (prevent concepts from always being on)
+            logits = torch.clamp(logits, min=-10, max=10)
+
             # Apply Gumbel-Sigmoid to get binary-ish activations
             h = self.gumbel_sigmoid(logits, tau=self.tau, hard=True)
 
@@ -287,25 +290,26 @@ def train_concept_model(features, actions, config):
             # Diversity loss: penalize concepts that are always active (saturation)
             concept_usage = (concepts > 0).float().mean(dim=0)  # [hidden_dim] - batch stats
 
-            # Update global activation rate (exponential moving average)
+            # Update global activation rate (exponential moving average) for monitoring
             if global_activation_rate is None:
                 global_activation_rate = concept_usage.detach()
             else:
                 global_activation_rate = ema_momentum * global_activation_rate + (1 - ema_momentum) * concept_usage.detach()
 
-            # Use global activation rates for diversity loss (detach to avoid backprop through EMA)
-            global_usage = global_activation_rate.detach()
-
-            # Target: with k and hidden_dim, expect ~k/hidden_dim activation per concept
+            # Use CURRENT BATCH for gradient (not detached global stats)
+            # This allows gradients to flow back to encoder
             target_rate = config['k'] / config['hidden_dim']
-            # Penalize deviation from target (both over and under)
-            deviation = torch.abs(global_usage - target_rate).mean()
-            # Extra penalty for saturation (>70%)
-            saturation_penalty = (F.relu(global_usage - 0.7) ** 2).mean()
-            # Penalty for dead neurons (<5%)
-            dead_penalty = (F.relu(0.05 - global_usage) ** 2).mean()
 
-            diversity_loss = deviation + 5.0 * saturation_penalty + 2.0 * dead_penalty
+            # Penalize deviation from target in current batch
+            deviation = torch.abs(concept_usage - target_rate).mean()
+
+            # Strong penalty for any concept active >80% in this batch
+            saturation_penalty = (F.relu(concept_usage - 0.8) ** 2).mean()
+
+            # Penalty for dead concepts in this batch
+            dead_penalty = (F.relu(0.1 - concept_usage) ** 2).mean()
+
+            diversity_loss = deviation + 10.0 * saturation_penalty + 1.0 * dead_penalty
 
             # Multi-objective loss
             loss = alpha * recon_loss + beta * action_loss + gamma * diversity_loss
