@@ -376,9 +376,9 @@ def train_sae(features, actions, next_features, next_actions, episode_mask, conf
                 with torch.no_grad():
                     all_preds = []
                     all_targets = []
-                    for batch_features, batch_actions in dataloader:
-                        batch_features = batch_features.to(device)
-                        batch_actions = batch_actions.to(device)
+                    for batch_data in dataloader:
+                        batch_features = batch_data[0].to(device)
+                        batch_actions = batch_data[1].to(device)
                         _, concepts = model(batch_features)
                         logits = action_predictor(concepts)
                         preds = logits.argmax(dim=-1)
