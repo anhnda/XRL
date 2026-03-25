@@ -235,7 +235,7 @@ class InteractionActionPredictor(nn.Module):
         """L1 norm of interaction weights for regularization."""
         if self.W_int is not None:
             return self.W_int.weight.abs().sum()
-        return torch.tensor(0.0)
+        return torch.tensor(0.0, device=self.W_a.weight.device)
 
 
 # ============================================================================
@@ -266,8 +266,11 @@ def init_from_stage1(model: OvercompleteSAE, stage1_data: dict, config: SAEConfi
 
     print(f"\n  ICA init: {n_stable} stable components (threshold={config.ica_stability_threshold})")
 
+    # Get the device the model lives on
+    model_device = model.W_d.device
+
     with torch.no_grad():
-        W_d = model.W_d.data  # (d, D)
+        W_d = model.W_d.data  # (d, D) — on model_device
 
         # --- Fill first n_stable columns with stable ICA directions ---
         if n_stable > 0:
@@ -280,7 +283,7 @@ def init_from_stage1(model: OvercompleteSAE, stage1_data: dict, config: SAEConfi
                     break
 
             for col, ica_idx in enumerate(ranked_stable):
-                direction = ica_directions[:, ica_idx]
+                direction = ica_directions[:, ica_idx].to(model_device)
                 W_d[:, col] = direction / (direction.norm() + 1e-8)
 
         # --- Fill remaining columns with random directions in signal subspace ---
@@ -289,14 +292,15 @@ def init_from_stage1(model: OvercompleteSAE, stage1_data: dict, config: SAEConfi
             k_svd = V_k.shape[1]
             # Random coefficients in PCA space, project to original space
             random_coeffs = torch.randn(k_svd, n_remaining)
-            random_dirs = V_k @ random_coeffs  # (d, n_remaining)
+            V_k_dev = V_k.to(model_device)
+            random_dirs = V_k_dev @ random_coeffs.to(model_device)  # (d, n_remaining)
             # Normalize
             norms = random_dirs.norm(dim=0, keepdim=True).clamp(min=1e-8)
             random_dirs = random_dirs / norms
             W_d[:, min(n_stable, D):] = random_dirs
         else:
             # Fallback: random unit vectors
-            random_dirs = torch.randn(d, n_remaining)
+            random_dirs = torch.randn(d, n_remaining, device=model_device)
             norms = random_dirs.norm(dim=0, keepdim=True).clamp(min=1e-8)
             W_d[:, min(n_stable, D):] = random_dirs / norms
 
@@ -307,7 +311,7 @@ def init_from_stage1(model: OvercompleteSAE, stage1_data: dict, config: SAEConfi
         model.W_e.data = model.W_d.data.t().clone()
 
         # Initialize decoder bias to feature mean
-        model.b_d.data = feature_mean.clone()
+        model.b_d.data = feature_mean.clone().to(model_device)
 
     print(f"  Decoder: {n_stable} ICA + {n_remaining} random signal-subspace directions")
     print(f"  Encoder: transposed decoder")
@@ -547,9 +551,15 @@ def train_sae(features: torch.Tensor, actions: torch.Tensor,
 
         init_from_stage1(model, stage1_norm, config)
 
+        # Ensure all model params are on correct device after init
+        model = model.to(device)
+
         V_k = V_k_norm.to(device)
     else:
         print("  Skipping ICA initialization (use_ica_init=False)")
+
+    # Defensive: ensure model is fully on device
+    model = model.to(device)
 
     # --- Select interaction pairs ---
     print("\n  Selecting interaction pairs...")
