@@ -1,3 +1,4 @@
+# Stage 1
 python feature_space_analysis.py \
     --model_path ppo_doorkey_5x5.zip \
     --env_name MiniGrid-DoorKey-5x5-v0 \
@@ -10,7 +11,7 @@ pythonpython feature_space_analysis.py \
     --features_path ./collected_data.pt \
     --save_dir ./stage1_outputs
 
-# More overcomplete, more runs, relaxed consensus
+# Stage 2  
 python sparse_concept_autoencoder.py \
     --features_path ./stage1_outputs/collected_data.pt \
     --stage1_path ./stage1_outputs/stage1_outputs.pt \
@@ -21,7 +22,7 @@ python sparse_concept_autoencoder.py \
     --n_runs 10 \
     --save_dir ./stage2_outputs_v2
 
-# Relaxed clustering + consensus
+# Stage 3 Relaxed clustering + consensus
 python consensus_concepts.py \
     --stage2_dir ./stage2_outputs_v2 \
     --features_path ./stage1_outputs/collected_data.pt \
@@ -31,6 +32,8 @@ python consensus_concepts.py \
     --distance_threshold 0.4 \
     --m_min_frac 0.6 \
     --save_dir ./stage3_outputs_v2
+
+# Stage 4
 python rule_extraction.py \
     --stage2_dir ./stage2_outputs_v2 \
     --stage3_path ./stage3_outputs_v2/stage3_outputs.pt \
