@@ -768,373 +768,6 @@ def save_stage4_outputs(
 # Main pipeline
 # ============================================================================
 
-def retrain_consensus_action_predictor(
-    model,
-    features: torch.Tensor,
-    actions: torch.Tensor,
-    feat_mean: torch.Tensor,
-    feat_std: torch.Tensor,
-    concept_mapping: torch.Tensor,
-    concept_labels: List[str],
-    n_actions: int = 7,
-    n_epochs: int = 200,
-    lr: float = 1e-2,
-    batch_size: int = 512,
-    include_interactions: bool = True,
-) -> Tuple[object, dict]:
-    """
-    Retrain an action predictor using ONLY consensus concept activations.
-
-    This forces the rules to be expressed entirely through grounded concepts
-    rather than relying on non-consensus hidden units.
-
-    Returns:
-        (consensus_predictor, training_info)
-    """
-    import torch.nn as nn
-    from torch.utils.data import DataLoader, TensorDataset
-
-    model.eval()
-    K = len(concept_mapping)
-
-    print(f"\n{'='*60}")
-    print(f"RETRAINING ACTION PREDICTOR ON CONSENSUS CONCEPTS ONLY")
-    print(f"{'='*60}")
-    print(f"  Consensus concepts: {K}")
-    print(f"  Labels: {concept_labels}")
-
-    # Extract consensus concept activations from the frozen SAE
-    features_norm = (features - feat_mean) / feat_std
-    with torch.no_grad():
-        _, z_sparse, _ = model(features_norm)
-        # Extract only the consensus columns
-        consensus_z = torch.zeros(len(features), K)
-        for ci in range(K):
-            col = concept_mapping[ci].item()
-            consensus_z[:, ci] = z_sparse[:, col]
-
-    # Also extract pairwise interactions
-    if include_interactions and K >= 2:
-        interaction_cols = []
-        interaction_names = []
-        for i in range(K):
-            for j in range(i + 1, K):
-                interaction_cols.append(consensus_z[:, i] * consensus_z[:, j])
-                interaction_names.append(f"{concept_labels[i]} AND {concept_labels[j]}")
-        interaction_features = torch.stack(interaction_cols, dim=1)  # (N, K_choose_2)
-        all_features = torch.cat([consensus_z, interaction_features], dim=1)
-        n_interaction = len(interaction_names)
-        print(f"  Features: {K} concepts + {n_interaction} interactions = {all_features.shape[1]}")
-    else:
-        all_features = consensus_z
-        n_interaction = 0
-        interaction_names = []
-
-    n_features = all_features.shape[1]
-
-    # Simple linear predictor (interpretable)
-    predictor = nn.Linear(n_features, n_actions)
-    nn.init.zeros_(predictor.weight)
-    nn.init.zeros_(predictor.bias)
-
-    optimizer = torch.optim.Adam(predictor.parameters(), lr=lr)
-    dataset = TensorDataset(all_features, actions)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-    best_acc = 0.0
-    best_state = None
-
-    for epoch in range(n_epochs):
-        total_loss = 0.0
-        total_correct = 0
-        total_samples = 0
-
-        for batch_x, batch_a in dataloader:
-            logits = predictor(batch_x)
-            loss = F.cross_entropy(logits, batch_a)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            total_correct += (logits.argmax(dim=-1) == batch_a).sum().item()
-            total_samples += len(batch_a)
-
-        acc = 100.0 * total_correct / total_samples
-        if acc > best_acc:
-            best_acc = acc
-            best_state = {k: v.clone() for k, v in predictor.state_dict().items()}
-
-        if (epoch + 1) % 50 == 0 or epoch == 0:
-            print(f"  Epoch {epoch+1:3d}/{n_epochs}: "
-                  f"loss={total_loss/len(dataloader):.4f}, acc={acc:.2f}%")
-
-    # Load best
-    predictor.load_state_dict(best_state)
-
-    # Final per-action accuracy
-    with torch.no_grad():
-        all_logits = predictor(all_features)
-        all_preds = all_logits.argmax(dim=-1)
-        final_acc = (all_preds == actions).float().mean().item()
-
-    print(f"\n  Final consensus predictor accuracy: {final_acc*100:.2f}%")
-    print(f"  (vs full model: this shows how much is explainable through {K} concepts)")
-
-    # Per-action
-    print(f"\n  Per-action accuracy (consensus predictor):")
-    for a in range(n_actions):
-        mask = actions == a
-        if mask.sum() > 0:
-            acc_a = (all_preds[mask] == a).float().mean().item()
-            print(f"    {ACTION_NAMES[a]:10s}: {acc_a*100:5.1f}% ({mask.sum().item()} samples)")
-
-    info = {
-        "consensus_accuracy": final_acc,
-        "n_concepts": K,
-        "n_interactions": n_interaction,
-        "interaction_names": interaction_names,
-        "concept_labels": concept_labels,
-    }
-
-    return predictor, consensus_z, all_features, interaction_names, info
-
-
-def extract_rules_from_consensus_predictor(
-    predictor,
-    concept_labels: List[str],
-    interaction_names: List[str],
-    weight_threshold: float = 0.05,
-    n_actions: int = 7,
-) -> List[Rule]:
-    """
-    Extract rules from the consensus-only linear predictor.
-
-    Since this predictor only has K concept features + K_choose_2 interaction
-    features, every weight directly corresponds to a named concept or
-    concept pair.
-    """
-    W = predictor.weight.data.cpu()  # (n_actions, n_features)
-    K = len(concept_labels)
-    n_int = len(interaction_names)
-
-    rules = []
-
-    for a in range(n_actions):
-        # Single concept rules
-        for ci in range(K):
-            w = W[a, ci].item()
-            if abs(w) > weight_threshold:
-                if w > 0:
-                    rules.append(Rule(
-                        action=a, action_name=ACTION_NAMES[a],
-                        positive_concepts=[ci], negative_concepts=[],
-                        positive_labels=[concept_labels[ci]], negative_labels=[],
-                        weight=w, rule_type="single",
-                    ))
-                else:
-                    rules.append(Rule(
-                        action=a, action_name=ACTION_NAMES[a],
-                        positive_concepts=[], negative_concepts=[ci],
-                        positive_labels=[], negative_labels=[concept_labels[ci]],
-                        weight=abs(w), rule_type="single",
-                    ))
-
-        # Interaction rules
-        for ii in range(n_int):
-            w = W[a, K + ii].item()
-            if abs(w) > weight_threshold:
-                # Parse interaction name "conceptA AND conceptB"
-                parts = interaction_names[ii].split(" AND ")
-                if w > 0:
-                    rules.append(Rule(
-                        action=a, action_name=ACTION_NAMES[a],
-                        positive_concepts=[], negative_concepts=[],
-                        positive_labels=parts, negative_labels=[],
-                        weight=w, rule_type="interaction",
-                    ))
-                else:
-                    rules.append(Rule(
-                        action=a, action_name=ACTION_NAMES[a],
-                        positive_concepts=[], negative_concepts=[],
-                        positive_labels=parts, negative_labels=[],
-                        weight=abs(w), rule_type="interaction_negative",
-                    ))
-
-    rules.sort(key=lambda r: r.weight, reverse=True)
-    return rules
-
-
-def evaluate_consensus_rules(
-    rules: List[Rule],
-    predictor,
-    all_features: torch.Tensor,
-    consensus_z: torch.Tensor,
-    actions: torch.Tensor,
-    concept_labels: List[str],
-    n_actions: int = 7,
-) -> dict:
-    """Evaluate rules from the consensus predictor."""
-    N = len(actions)
-    K = len(concept_labels)
-
-    with torch.no_grad():
-        logits = predictor(all_features)
-        pred_actions = logits.argmax(dim=-1)
-
-    full_fidelity = (pred_actions == actions).float().mean().item()
-
-    # Binarize consensus concepts
-    concept_active = consensus_z > 0  # (N, K)
-
-    # Match rules to states (priority order)
-    rule_predictions = torch.full((N,), -1, dtype=torch.long)
-    rule_fired = torch.zeros(N, dtype=torch.bool)
-
-    for rule in rules:
-        match = torch.ones(N, dtype=torch.bool)
-        for ci in rule.positive_concepts:
-            if ci < K:
-                match &= concept_active[:, ci]
-        for ci in rule.negative_concepts:
-            if ci < K:
-                match &= ~concept_active[:, ci]
-        # For interaction rules, check via labels
-        if rule.rule_type == "interaction" and len(rule.positive_labels) == 2:
-            for label in rule.positive_labels:
-                if label in concept_labels:
-                    ci = concept_labels.index(label)
-                    match &= concept_active[:, ci]
-
-        new_matches = match & ~rule_fired
-        rule_predictions[new_matches] = rule.action
-        rule_fired |= match
-
-    coverage = rule_fired.float().mean().item()
-    covered_mask = rule_predictions >= 0
-    if covered_mask.sum() > 0:
-        rule_fidelity = (rule_predictions[covered_mask] == actions[covered_mask]).float().mean().item()
-    else:
-        rule_fidelity = 0.0
-
-    # Per-action
-    per_action = {}
-    for a in range(n_actions):
-        mask = actions == a
-        if mask.sum() > 0:
-            acc = (pred_actions[mask] == a).float().mean().item()
-            per_action[ACTION_NAMES[a]] = {
-                "accuracy": acc, "count": int(mask.sum().item())
-            }
-
-    result = {
-        "consensus_fidelity": full_fidelity,
-        "rule_fidelity": rule_fidelity,
-        "coverage": coverage,
-        "n_rules": len(rules),
-        "mean_rule_length": np.mean([
-            len(r.positive_concepts) + len(r.negative_concepts) +
-            len(r.positive_labels) + len(r.negative_labels)
-            for r in rules
-        ]) if rules else 0.0,
-        "per_action": per_action,
-    }
-
-    print(f"\n{'='*60}")
-    print(f"CONSENSUS RULE EVALUATION")
-    print(f"{'='*60}")
-    print(f"  Consensus predictor fidelity : {full_fidelity*100:.2f}%")
-    print(f"  Rule-based fidelity          : {rule_fidelity*100:.2f}%")
-    print(f"  Coverage                     : {coverage*100:.1f}%")
-    print(f"  Number of rules              : {len(rules)}")
-    print(f"\n  Per-action accuracy (consensus predictor):")
-    for name, data in per_action.items():
-        print(f"    {name:10s}: {data['accuracy']*100:5.1f}% ({data['count']} samples)")
-
-    return result
-
-
-def causal_interventions_consensus(
-    predictor,
-    consensus_z: torch.Tensor,
-    all_features: torch.Tensor,
-    concept_labels: List[str],
-    interaction_names: List[str],
-    n_sample: int = 2000,
-) -> dict:
-    """Causal interventions on the consensus-only predictor."""
-    K = len(concept_labels)
-    cz = consensus_z[:n_sample]
-    af = all_features[:n_sample]
-
-    with torch.no_grad():
-        original_probs = F.softmax(predictor(af), dim=-1)
-
-    results = []
-    for ci in range(K):
-        inactive_mask = cz[:, ci] <= 0
-        if inactive_mask.sum() < 10:
-            results.append({
-                "concept": ci, "label": concept_labels[ci],
-                "kl_div": 0.0, "n_inactive": int(inactive_mask.sum().item()),
-            })
-            continue
-
-        active_vals = cz[~inactive_mask, ci]
-        act_val = active_vals.median().item() if len(active_vals) > 0 else 1.0
-
-        # Intervene on consensus_z AND rebuild all_features (including interactions)
-        cz_int = cz.clone()
-        cz_int[inactive_mask, ci] = act_val
-
-        # Rebuild interaction features
-        if K >= 2:
-            int_cols = []
-            for i in range(K):
-                for j in range(i + 1, K):
-                    int_cols.append(cz_int[:, i] * cz_int[:, j])
-            af_int = torch.cat([cz_int, torch.stack(int_cols, dim=1)], dim=1)
-        else:
-            af_int = cz_int
-
-        with torch.no_grad():
-            int_probs = F.softmax(predictor(af_int), dim=-1)
-
-        kl = F.kl_div(
-            int_probs[inactive_mask].log().clamp(min=-100),
-            original_probs[inactive_mask],
-            reduction="batchmean", log_target=False,
-        ).item()
-
-        prob_diff = (int_probs[inactive_mask] - original_probs[inactive_mask]).mean(dim=0)
-        most_inc = prob_diff.argmax().item()
-        most_dec = prob_diff.argmin().item()
-
-        results.append({
-            "concept": ci, "label": concept_labels[ci],
-            "kl_div": abs(kl),
-            "most_increased_action": ACTION_NAMES[most_inc],
-            "most_decreased_action": ACTION_NAMES[most_dec],
-            "prob_shift": prob_diff.tolist(),
-            "n_inactive": int(inactive_mask.sum().item()),
-        })
-
-    results.sort(key=lambda r: r["kl_div"], reverse=True)
-
-    print(f"\n{'='*60}")
-    print(f"CAUSAL INTERVENTIONS — CONSENSUS PREDICTOR ({K} concepts)")
-    print(f"{'='*60}")
-    for r in results:
-        print(f"  C{r['concept']:02d} ({r['label']:20s}): "
-              f"KL={r['kl_div']:.4f}  "
-              f"+{r.get('most_increased_action', 'N/A'):10s}  "
-              f"-{r.get('most_decreased_action', 'N/A'):10s}  "
-              f"(n_inactive={r['n_inactive']})")
-
-    return {"concept_interventions": results}
-
-
 def run_stage4(
     stage2_dir: str,
     stage3_data: dict,
@@ -1145,8 +778,6 @@ def run_stage4(
     save_dir: str = "./stage4_outputs",
     weight_threshold: float = 0.1,
     n_sample_causal: int = 2000,
-    consensus_retrain_epochs: int = 200,
-    consensus_retrain_lr: float = 1e-2,
 ) -> dict:
     """Run the full Stage 4 pipeline."""
     from sparse_concept_autoencoder import load_run
@@ -1169,63 +800,35 @@ def run_stage4(
     print(f"  Consensus concepts: {K}")
     print(f"  Concept labels: {concept_labels}")
 
-    # =============================================
-    # 4.0 Report full model fidelity for reference
-    # =============================================
-    model.eval()
-    features_norm = (features - feat_mean) / feat_std
-    with torch.no_grad():
-        _, z_sparse, _ = model(features_norm)
-        full_logits = action_predictor(z_sparse)
-        full_preds = full_logits.argmax(dim=-1)
-        full_fidelity = (full_preds == actions).float().mean().item()
-    print(f"\n  Full model fidelity (all {model.hidden_dim} dims): {full_fidelity*100:.2f}%")
-
-    # =============================================
-    # 4.1 Retrain action predictor on consensus concepts only
-    # =============================================
-    cons_predictor, consensus_z, all_features, interaction_names, retrain_info = \
-        retrain_consensus_action_predictor(
-            model, features, actions, feat_mean, feat_std,
-            concept_mapping, concept_labels,
-            n_epochs=consensus_retrain_epochs,
-            lr=consensus_retrain_lr,
-        )
-
-    # =============================================
-    # 4.2 Extract rules from consensus predictor
-    # =============================================
-    print(f"\n  Extracting rules from consensus predictor (threshold={weight_threshold})...")
-    rules = extract_rules_from_consensus_predictor(
-        cons_predictor, concept_labels, interaction_names,
+    # 4.1 Extract rules
+    print(f"\n  Extracting rules (threshold={weight_threshold})...")
+    rules = extract_rules(
+        action_predictor, concept_mapping, concept_labels,
         weight_threshold=weight_threshold,
     )
     print(f"  Found {len(rules)} rules")
-    print(f"\n  Rules:")
-    for i, r in enumerate(rules):
+
+    # Print top rules
+    print(f"\n  Top 20 rules:")
+    for i, r in enumerate(rules[:20]):
         print(f"    {i+1:2d}. {r}")
 
-    # =============================================
-    # 4.3 Evaluate consensus rules
-    # =============================================
-    eval_result = evaluate_consensus_rules(
-        rules, cons_predictor, all_features, consensus_z,
-        actions, concept_labels,
+    # 4.2 Evaluate
+    eval_result = evaluate_rules(
+        rules, model, action_predictor,
+        features, actions, feat_mean, feat_std,
+        concept_mapping,
     )
-    eval_result["full_model_fidelity"] = full_fidelity
 
-    # =============================================
-    # 4.4 Causal interventions on consensus predictor
-    # =============================================
-    causal_result = causal_interventions_consensus(
-        cons_predictor, consensus_z, all_features,
-        concept_labels, interaction_names,
+    # 4.3 Causal interventions
+    causal_result = causal_interventions(
+        model, action_predictor,
+        features, feat_mean, feat_std,
+        concept_mapping, concept_labels,
         n_sample=n_sample_causal,
     )
 
-    # =============================================
-    # 4.5 Rule-level causal validation
-    # =============================================
+    # 4.4 Rule-level causal validation
     validation_result = validate_rules_causally(
         rules, model, action_predictor,
         features, feat_mean, feat_std,
@@ -1233,51 +836,30 @@ def run_stage4(
         n_sample=n_sample_causal,
     )
 
-    # =============================================
-    # 4.6 Plots
-    # =============================================
+    # 4.5 Plots
     plot_stage4_diagnostics(
         rules, eval_result, causal_result, validation_result, save_dir,
     )
 
-    # =============================================
-    # 4.7 Report
-    # =============================================
+    # 4.6 Report
     generate_rule_report(
         rules, eval_result, causal_result, validation_result,
         stage3_data,
         os.path.join(save_dir, "rule_report.txt"),
     )
 
-    # =============================================
-    # 4.8 Save
-    # =============================================
+    # 4.7 Save
     save_stage4_outputs(rules, eval_result, causal_result, validation_result, save_dir)
-
-    # Save consensus predictor weights
-    os.makedirs(save_dir, exist_ok=True)
-    torch.save({
-        "weight": cons_predictor.weight.data,
-        "bias": cons_predictor.bias.data,
-        "concept_labels": concept_labels,
-        "interaction_names": interaction_names,
-        "retrain_info": retrain_info,
-    }, os.path.join(save_dir, "consensus_predictor.pt"))
 
     print(f"\n{'='*60}")
     print(f"STAGE 4 COMPLETE")
     print(f"{'='*60}")
-    print(f"  Full model fidelity      : {full_fidelity*100:.2f}%")
-    print(f"  Consensus pred fidelity  : {retrain_info['consensus_accuracy']*100:.2f}%")
-    print(f"  Explainability gap       : {(full_fidelity - retrain_info['consensus_accuracy'])*100:.2f}%")
-    print(f"  Rules                    : {len(rules)}")
 
     return {
         "rules": rules,
         "eval": eval_result,
         "causal": causal_result,
         "validation": validation_result,
-        "retrain_info": retrain_info,
     }
 
 
@@ -1293,14 +875,10 @@ def main():
     parser.add_argument("--features_path", type=str, required=True)
     parser.add_argument("--stage1_path", type=str, required=True)
 
-    parser.add_argument("--weight_threshold", type=float, default=0.05,
+    parser.add_argument("--weight_threshold", type=float, default=0.1,
                         help="Min |weight| for rule inclusion")
     parser.add_argument("--n_sample_causal", type=int, default=2000,
                         help="Samples for causal interventions")
-    parser.add_argument("--consensus_retrain_epochs", type=int, default=200,
-                        help="Epochs for retraining consensus action predictor")
-    parser.add_argument("--consensus_retrain_lr", type=float, default=1e-2,
-                        help="Learning rate for consensus predictor retraining")
     parser.add_argument("--save_dir", type=str, default="./stage4_outputs")
 
     args = parser.parse_args()
@@ -1326,8 +904,6 @@ def main():
         save_dir=args.save_dir,
         weight_threshold=args.weight_threshold,
         n_sample_causal=args.n_sample_causal,
-        consensus_retrain_epochs=args.consensus_retrain_epochs,
-        consensus_retrain_lr=args.consensus_retrain_lr,
     )
 
 

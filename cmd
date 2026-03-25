@@ -27,7 +27,7 @@ python sparse_concept_autoencoder.py \
 python sparse_concept_autoencoder.py \
     --features_path ./stage1_outputs/collected_data.pt \
     --stage1_path ./stage1_outputs/stage1_outputs.pt \
-    --hidden_dim 32 \
+    --hidden_dim 64 \
     --k 4 \
     --n_epochs 200 \
     --batch_size 256 \
@@ -49,7 +49,7 @@ python consensus_concepts.py \
     --stage2_dir ./stage2_outputs \
     --features_path ./stage1_outputs/collected_data.pt \
     --stage1_path ./stage1_outputs/stage1_outputs.pt \
-    --m_min_frac 0.8 \
+    --m_min_frac 0.6 \
     --save_dir ./stage3_outputs
 
 # With env grounding (recommended for paper results)
@@ -59,7 +59,7 @@ python consensus_concepts.py \
     --stage1_path ./stage1_outputs/stage1_outputs.pt \
     --model_path ppo_doorkey_5x5.zip \
     --env_name MiniGrid-DoorKey-5x5-v0 \
-    --m_min_frac 0.8 \
+    --m_min_frac 0.6 \
     --save_dir ./stage3_outputs
 
 python rule_extraction.py \
@@ -69,3 +69,34 @@ python rule_extraction.py \
     --stage1_path ./stage1_outputs/stage1_outputs.pt \
     --weight_threshold 0.1 \
     --save_dir ./stage4_outputs
+
+    ===
+
+# More overcomplete, more runs, relaxed consensus
+python sparse_concept_autoencoder.py \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --hidden_dim 128 --k 6 \
+    --n_epochs 200 --lr 3e-4 \
+    --alpha 1.0 --beta 2.0 \
+    --lambda1 5e-3 --lambda2 1e-3 --lambda3 0.5 \
+    --n_runs 10 \
+    --save_dir ./stage2_outputs_v2
+
+# Relaxed clustering + consensus
+python consensus_concepts.py \
+    --stage2_dir ./stage2_outputs_v2 \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --model_path ppo_doorkey_5x5.zip \
+    --env_name MiniGrid-DoorKey-5x5-v0 \
+    --distance_threshold 0.4 \
+    --m_min_frac 0.6 \
+    --save_dir ./stage3_outputs_v2
+python rule_extraction.py \
+    --stage2_dir ./stage2_outputs_v2 \
+    --stage3_path ./stage3_outputs_v2/stage3_outputs.pt \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --weight_threshold 0.1 \
+    --save_dir ./stage4_outputs_v2
