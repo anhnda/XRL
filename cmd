@@ -61,3 +61,11 @@ python consensus_concepts.py \
     --env_name MiniGrid-DoorKey-5x5-v0 \
     --m_min_frac 0.8 \
     --save_dir ./stage3_outputs
+
+python rule_extraction.py \
+    --stage2_dir ./stage2_outputs \
+    --stage3_path ./stage3_outputs/stage3_outputs.pt \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --weight_threshold 0.1 \
+    --save_dir ./stage4_outputs
