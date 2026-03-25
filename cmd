@@ -43,3 +43,21 @@ python sparse_concept_autoencoder.py \
     --log_every 10 \
     --n_runs 5 \
     --save_dir ./stage2_outputs
+
+# Without env grounding (faster)
+python consensus_concepts.py \
+    --stage2_dir ./stage2_outputs \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --m_min_frac 0.8 \
+    --save_dir ./stage3_outputs
+
+# With env grounding (recommended for paper results)
+python consensus_concepts.py \
+    --stage2_dir ./stage2_outputs \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --model_path ppo_doorkey_5x5.zip \
+    --env_name MiniGrid-DoorKey-5x5-v0 \
+    --m_min_frac 0.8 \
+    --save_dir ./stage3_outputs
