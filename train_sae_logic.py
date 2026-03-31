@@ -359,15 +359,17 @@ def train_two_stage(
 
             train_info.append(info)
 
-        # Validation
-        val_acc = evaluate(model, val_loader, device)
+        # Validation (use soft logic in first half for stability)
+        use_soft_eval = epoch < (config.n_epochs * 3 // 4)
+        val_acc = evaluate(model, val_loader, device, use_soft=use_soft_eval)
 
         if (epoch + 1) % config.log_every == 0:
             avg_info = {k: np.mean([d[k] for d in train_info]) for k in train_info[0]}
+            eval_mode = "soft" if use_soft_eval else "hard"
             print(f"  Epoch {epoch+1}/{config.n_epochs} | "
                   f"Loss: {avg_info['total_loss']:.4f} | "
                   f"Train Acc: {avg_info['accuracy']:.3f} | "
-                  f"Val Acc: {val_acc:.3f} | "
+                  f"Val Acc: {val_acc:.3f} ({eval_mode}) | "
                   f"Temp: {current_temp:.3f}")
 
         # Save best model
@@ -455,15 +457,17 @@ def train_joint(
 
             train_info.append(info)
 
-        # Validation
-        val_acc = evaluate(model, val_loader, device)
+        # Validation (use soft logic in first 75% of training for stability)
+        use_soft_eval = epoch < (config.n_epochs * 3 // 4)
+        val_acc = evaluate(model, val_loader, device, use_soft=use_soft_eval)
 
         if (epoch + 1) % config.log_every == 0:
             avg_info = {k: np.mean([d[k] for d in train_info]) for k in train_info[0]}
+            eval_mode = "soft" if use_soft_eval else "hard"
             print(f"  Epoch {epoch+1}/{config.n_epochs} | "
                   f"Loss: {avg_info['total_loss']:.4f} | "
                   f"Train Acc: {avg_info['accuracy']:.3f} | "
-                  f"Val Acc: {val_acc:.3f} | "
+                  f"Val Acc: {val_acc:.3f} ({eval_mode}) | "
                   f"Temp: {current_temp:.3f}")
 
         # Save best model
@@ -478,9 +482,21 @@ def train_joint(
     return best_model_state, best_val_acc
 
 
-def evaluate(model: SAELogicAgent, loader: DataLoader, device: str) -> float:
-    """Evaluate model accuracy"""
-    model.eval()
+def evaluate(model: SAELogicAgent, loader: DataLoader, device: str, use_soft: bool = False) -> float:
+    """Evaluate model accuracy
+
+    Args:
+        model: The model to evaluate
+        loader: DataLoader for evaluation data
+        device: Device to run on
+        use_soft: If True, keep model in train mode to use soft logic (for early training)
+    """
+    if not use_soft:
+        model.eval()
+    else:
+        # Keep in train mode but disable dropout if any
+        model.train()
+
     correct = 0
     total = 0
 
