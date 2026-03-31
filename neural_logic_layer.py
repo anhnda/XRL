@@ -53,14 +53,16 @@ class LearnableNeuralLogicLayer(nn.Module):
         # Shape: (n_features, n_clauses)
         # clause_weights[:, j] defines clause j
         # +1 = feature must be active, -1 = feature must be inactive, 0 = don't care
+        # Initialize with larger values so sign() gives meaningful ternary weights
         self.clause_weights = nn.Parameter(
-            torch.randn(n_features, self.n_clauses, device=device) * 0.1
+            torch.randn(n_features, self.n_clauses, device=device) * 2.0
         )
 
         # Learnable feature selection mask (which features to use in each clause)
         # Uses L0 regularization to encourage sparsity
+        # Initialize with positive bias so features are initially included
         self.mask_logits = nn.Parameter(
-            torch.randn(n_features, self.n_clauses, device=device) * 0.1
+            torch.randn(n_features, self.n_clauses, device=device) * 0.5 + 2.0
         )
 
         # Clause to action assignment
@@ -229,6 +231,10 @@ class LearnableNeuralLogicLayer(nn.Module):
             else:
                 # Hard OR: max
                 action_scores[:, a] = action_clauses.max(dim=1)[0]
+
+        # Add small epsilon to prevent all-zero scores (numerical stability)
+        if self.training:
+            action_scores = action_scores + 1e-6
 
         return action_scores
 
