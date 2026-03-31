@@ -128,12 +128,16 @@ class LearnableNeuralLogicLayer(nn.Module):
         clause_weight: torch.Tensor
     ) -> torch.Tensor:
         """
-        Soft evaluation of a clause using smooth minimum (LogSumExp trick).
+        Soft evaluation of a clause using Łukasiewicz T-Norm.
 
         A clause is a conjunction: c1 ∧ c2 ∧ ¬c3 ∧ ...
-        We use smooth-min as soft AND: AND(x) ≈ smooth_min(x)
+        Łukasiewicz T-Norm: AND(x1, x2, ..., xn) = max(0, sum(xi) - (n-1))
 
-        This is more stable than product t-norm for many literals.
+        Key properties:
+        - At binary {0,1}: exact same as hard AND (all must be 1)
+        - Differentiable everywhere
+        - Strict: requires all literals to be high
+        - No vanishing gradients (unlike product)
 
         Args:
             features: (batch, n_features) in [0, 1]
@@ -163,17 +167,16 @@ class LearnableNeuralLogicLayer(nn.Module):
         # Extract only active literals
         # Shape: (batch, n_features) -> (batch, n_active)
         active_literals = literal_values[:, active_mask]
+        n_active = active_literals.shape[1]
 
-        # Soft AND using temperature-scaled weighted minimum
-        # This is differentiable and approximates min as temp → 0
-        temp = self.temperature.clamp(min=0.1)
-
-        # Softmin: weighted average where smaller values get exponentially more weight
-        weights = F.softmax(-active_literals / temp, dim=1)
-        satisfaction = (weights * active_literals).sum(dim=1)
-
-        # Clamp to [0, 1] range
-        satisfaction = satisfaction.clamp(0.0, 1.0)
+        # Łukasiewicz T-Norm: max(0, sum(x_i) - (n-1))
+        # This means: all literals must sum to at least (n-1) to get non-zero satisfaction
+        # At binary: all must be 1 to get satisfaction = 1
+        satisfaction = torch.clamp(
+            active_literals.sum(dim=1) - (n_active - 1),
+            min=0.0,
+            max=1.0
+        )
 
         return satisfaction
 
@@ -211,10 +214,11 @@ class LearnableNeuralLogicLayer(nn.Module):
         """
         Forward pass: features → clause satisfaction → action scores
 
-        Uses soft logic during training for gradients, hard logic at inference
+        Uses Łukasiewicz T-Norm which works identically for both training and inference
+        when features are binary {0, 1}
 
         Args:
-            features: (batch, n_features) binary or continuous SAE features
+            features: (batch, n_features) binary features (with gradients in training)
 
         Returns:
             action_logits: (batch, n_actions)
@@ -222,17 +226,12 @@ class LearnableNeuralLogicLayer(nn.Module):
         batch_size = features.shape[0]
         clause_weights = self.get_clause_weights()
 
-        # Evaluate all clauses
+        # Evaluate all clauses using Łukasiewicz AND
+        # This works for both soft (with gradients) and hard (binary) features
         clause_sat = torch.zeros(batch_size, self.n_clauses, device=features.device)
 
-        if self.training:
-            # Use SOFT logic during training for gradients
-            for j in range(self.n_clauses):
-                clause_sat[:, j] = self.evaluate_clause_soft(features, clause_weights[:, j])
-        else:
-            # Use HARD logic at inference for interpretability
-            for j in range(self.n_clauses):
-                clause_sat[:, j] = self.evaluate_clause_hard(features, clause_weights[:, j])
+        for j in range(self.n_clauses):
+            clause_sat[:, j] = self.evaluate_clause_soft(features, clause_weights[:, j])
 
         # Aggregate clauses per action using OR (sum of satisfied clauses)
         action_scores = torch.zeros(batch_size, self.n_actions, device=features.device)
@@ -244,7 +243,8 @@ class LearnableNeuralLogicLayer(nn.Module):
             if action_clauses.numel() == 0:
                 continue
 
-            # Sum clause satisfaction scores (soft OR during training, count at inference)
+            # Sum clause satisfaction scores
+            # At binary: this counts number of satisfied clauses
             action_scores[:, a] = action_clauses.sum(dim=1)
 
         return action_scores

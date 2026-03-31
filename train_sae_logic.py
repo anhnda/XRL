@@ -49,6 +49,60 @@ from neural_logic_layer import LearnableNeuralLogicLayer, binarize_sae_features
 
 
 # ============================================================================
+# Differentiable Binarization
+# ============================================================================
+
+def gumbel_topk_binarization(
+    features: torch.Tensor,
+    k: int,
+    temperature: float = 1.0,
+    training: bool = True
+) -> torch.Tensor:
+    """
+    Differentiable top-k binarization using Gumbel-Softmax.
+
+    During training: Uses Gumbel noise + straight-through estimator
+    During inference: Uses hard top-k selection
+
+    Args:
+        features: (batch, n_features) continuous SAE activations
+        k: number of features to select
+        temperature: Gumbel-Softmax temperature (lower = more discrete)
+        training: whether in training mode
+
+    Returns:
+        binary_features: (batch, n_features) in {0, 1} with gradients
+    """
+    if training:
+        # Add Gumbel noise for stochastic exploration
+        gumbel_noise = -torch.log(-torch.log(torch.rand_like(features) + 1e-8) + 1e-8)
+        logits = features + temperature * gumbel_noise
+    else:
+        logits = features
+
+    # Hard top-k selection
+    _, topk_idx = torch.topk(logits, k, dim=-1)
+    binary_hard = torch.zeros_like(features)
+    binary_hard.scatter_(-1, topk_idx, 1.0)
+
+    if training:
+        # Straight-through estimator: hard forward, soft backward
+        # Soft distribution: sigmoid over scaled features
+        soft_probs = torch.sigmoid(features / (temperature + 1e-8))
+
+        # Keep top-k for soft as well (soft masking)
+        soft_topk = torch.zeros_like(features)
+        soft_topk.scatter_(-1, topk_idx, 1.0)
+        soft_probs = soft_probs * soft_topk
+
+        # Straight-through: gradient flows through soft, but forward uses hard
+        binary = binary_hard.detach() - soft_probs.detach() + soft_probs
+        return binary
+    else:
+        return binary_hard
+
+
+# ============================================================================
 # Configuration
 # ============================================================================
 
@@ -155,47 +209,32 @@ class SAELogicAgent(nn.Module):
         # SAE encoding
         z_sparse, z_pre = self.sae.encode(x)
 
-        # Prepare features for logic layer
-        if self.training:
-            # During training: use continuous features (with gradients)
-            # Use sigmoid with scaling: 0 → ~0, 1 → 0.5, 2+ → ~1
-            # Shift by -1 so that z=0 maps to sigmoid(-inf) ≈ 0
-            logic_features = torch.sigmoid((z_sparse - 1.0) * 3.0)
-        else:
-            # At inference: use hard binary features (interpretable)
-            topk_val = self.config.binarization_topk
-            if self.config.binarization_method == "topk" and topk_val is None:
-                topk_val = self.config.k
+        # Determine k for top-k selection
+        topk_val = self.config.binarization_topk
+        if topk_val is None:
+            topk_val = self.config.k
 
-            logic_features = binarize_sae_features(
-                z_sparse,
-                method=self.config.binarization_method,
-                threshold=self.config.binarization_threshold,
-                top_k=topk_val
-            )
+        # Binarize features using Gumbel-Softmax (differentiable)
+        # Use logic layer's temperature for consistency
+        gumbel_temp = self.logic_layer.temperature.item()
+        logic_features = gumbel_topk_binarization(
+            z_sparse,
+            k=topk_val,
+            temperature=gumbel_temp,
+            training=self.training
+        )
 
-        # Logic layer
+        # Logic layer forward
         action_logits = self.logic_layer(logic_features)
 
         if return_features:
             x_recon = self.sae.decode(z_sparse)
 
-            # Compute binary features for monitoring
-            topk_val = self.config.binarization_topk
-            if self.config.binarization_method == "topk" and topk_val is None:
-                topk_val = self.config.k
-            binary_features = binarize_sae_features(
-                z_sparse,
-                method=self.config.binarization_method,
-                threshold=self.config.binarization_threshold,
-                top_k=topk_val
-            )
-
             return action_logits, {
                 'z_sparse': z_sparse,
                 'z_pre': z_pre,
                 'logic_features': logic_features,
-                'binary_features': binary_features,
+                'binary_features': logic_features,  # Now same as logic_features
                 'x_recon': x_recon
             }
 
@@ -378,17 +417,15 @@ def train_two_stage(
 
             train_info.append(info)
 
-        # Validation (use soft logic in first 90% for stability)
-        use_soft_eval = epoch < (config.n_epochs * 9 // 10)
-        val_acc = evaluate(model, val_loader, device, use_soft=use_soft_eval)
+        # Validation
+        val_acc = evaluate(model, val_loader, device)
 
         if (epoch + 1) % config.log_every == 0:
             avg_info = {k: np.mean([d[k] for d in train_info]) for k in train_info[0]}
-            eval_mode = "soft" if use_soft_eval else "hard"
             print(f"  Epoch {epoch+1}/{config.n_epochs} | "
                   f"Loss: {avg_info['total_loss']:.4f} | "
                   f"Train Acc: {avg_info['accuracy']:.3f} | "
-                  f"Val Acc: {val_acc:.3f} ({eval_mode}) | "
+                  f"Val Acc: {val_acc:.3f} | "
                   f"Temp: {current_temp:.3f}")
 
         # Save best model
@@ -476,17 +513,15 @@ def train_joint(
 
             train_info.append(info)
 
-        # Validation (use soft logic in first 90% of training for stability)
-        use_soft_eval = epoch < (config.n_epochs * 9 // 10)
-        val_acc = evaluate(model, val_loader, device, use_soft=use_soft_eval)
+        # Validation
+        val_acc = evaluate(model, val_loader, device)
 
         if (epoch + 1) % config.log_every == 0:
             avg_info = {k: np.mean([d[k] for d in train_info]) for k in train_info[0]}
-            eval_mode = "soft" if use_soft_eval else "hard"
             print(f"  Epoch {epoch+1}/{config.n_epochs} | "
                   f"Loss: {avg_info['total_loss']:.4f} | "
                   f"Train Acc: {avg_info['accuracy']:.3f} | "
-                  f"Val Acc: {val_acc:.3f} ({eval_mode}) | "
+                  f"Val Acc: {val_acc:.3f} | "
                   f"Temp: {current_temp:.3f}")
 
         # Save best model
@@ -501,21 +536,15 @@ def train_joint(
     return best_model_state, best_val_acc
 
 
-def evaluate(model: SAELogicAgent, loader: DataLoader, device: str, use_soft: bool = False) -> float:
+def evaluate(model: SAELogicAgent, loader: DataLoader, device: str) -> float:
     """Evaluate model accuracy
 
     Args:
         model: The model to evaluate
         loader: DataLoader for evaluation data
         device: Device to run on
-        use_soft: If True, keep model in train mode to use soft logic (for early training)
     """
-    if not use_soft:
-        model.eval()
-    else:
-        # Keep in train mode but disable dropout if any
-        model.train()
-
+    model.eval()
     correct = 0
     total = 0
 
