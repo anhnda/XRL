@@ -42,3 +42,36 @@ python rule_extraction.py \
     --weight_threshold 0.05 \
     --consensus_retrain_epochs 500 \
     --save_dir ./stage4_outputs_v3
+
+# ============================================================================
+# NEURAL LOGIC NETWORK (Alternative to Stage 2-4)
+# ============================================================================
+# Train SAE + Learnable Neural Logic Layer for fully interpretable rules
+
+# Option 1: Joint training (recommended for best performance)
+python train_sae_logic.py \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --mode joint \
+    --hidden_dim 256 \
+    --k 10 \
+    --n_clauses_per_action 10 \
+    --n_epochs 200 \
+    --save_dir ./sae_logic_outputs
+
+# Option 2: Two-stage training (SAE first, then logic)
+python train_sae_logic.py \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --mode two_stage \
+    --hidden_dim 256 \
+    --k 10 \
+    --n_clauses_per_action 10 \
+    --n_epochs 200 \
+    --save_dir ./sae_logic_outputs
+
+# Visualize and analyze learned logic rules
+python visualize_logic_rules.py \
+    --model_path ./sae_logic_outputs/sae_logic_model.pt \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --save_dir ./rule_visualizations
