@@ -128,16 +128,12 @@ class LearnableNeuralLogicLayer(nn.Module):
         clause_weight: torch.Tensor
     ) -> torch.Tensor:
         """
-        Soft evaluation of a clause using Łukasiewicz T-Norm.
+        Temperature-scaled soft AND using interpolation between mean and minimum.
 
-        A clause is a conjunction: c1 ∧ c2 ∧ ¬c3 ∧ ...
-        Łukasiewicz T-Norm: AND(x1, x2, ..., xn) = max(0, sum(xi) - (n-1))
+        At high temperature: uses mean (soft, more gradient signal)
+        At low temperature: uses minimum (strict, like hard AND)
 
-        Key properties:
-        - At binary {0,1}: exact same as hard AND (all must be 1)
-        - Differentiable everywhere
-        - Strict: requires all literals to be high
-        - No vanishing gradients (unlike product)
+        This provides gradient signal early in training while converging to strict AND.
 
         Args:
             features: (batch, n_features) in [0, 1]
@@ -167,16 +163,19 @@ class LearnableNeuralLogicLayer(nn.Module):
         # Extract only active literals
         # Shape: (batch, n_features) -> (batch, n_active)
         active_literals = literal_values[:, active_mask]
-        n_active = active_literals.shape[1]
 
-        # Łukasiewicz T-Norm: max(0, sum(x_i) - (n-1))
-        # This means: all literals must sum to at least (n-1) to get non-zero satisfaction
-        # At binary: all must be 1 to get satisfaction = 1
-        satisfaction = torch.clamp(
-            active_literals.sum(dim=1) - (n_active - 1),
-            min=0.0,
-            max=1.0
-        )
+        # Temperature-based smooth minimum
+        # High temp: softer (more like mean)
+        # Low temp: stricter (more like min)
+        temp = self.temperature.clamp(min=0.3, max=5.0)
+
+        # Smooth minimum via LogSumExp: smooth_min(x) ≈ -temp * logsumexp(-x/temp)
+        # As temp→0: approaches min(x) (hard AND)
+        # As temp→∞: approaches mean(x) (soft)
+        smooth_min = -temp * torch.logsumexp(-active_literals / temp, dim=1)
+
+        # Clamp to [0, 1]
+        satisfaction = smooth_min.clamp(0.0, 1.0)
 
         return satisfaction
 

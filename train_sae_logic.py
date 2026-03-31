@@ -74,9 +74,11 @@ def gumbel_topk_binarization(
         binary_features: (batch, n_features) in {0, 1} with gradients
     """
     if training:
-        # Add Gumbel noise for stochastic exploration
+        # Add Gumbel noise for stochastic exploration (scaled down for stability)
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(features) + 1e-8) + 1e-8)
-        logits = features + temperature * gumbel_noise
+        # Use temperature^2 to reduce noise early on when temp is high
+        noise_scale = (temperature / 5.0) ** 2  # At temp=5: scale=1, at temp=1: scale=0.04
+        logits = features + noise_scale * gumbel_noise
     else:
         logits = features
 
