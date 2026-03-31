@@ -69,9 +69,9 @@ class SAELogicConfig:
     temp_decay: float = 0.98  # Multiplicative decay per epoch
 
     # Feature binarization
-    binarization_method: str = "threshold"  # "threshold" or "topk"
-    binarization_threshold: float = 0.1
-    binarization_topk: Optional[int] = None
+    binarization_method: str = "topk"  # "threshold" or "topk"
+    binarization_threshold: float = 0.01  # Lower threshold if using threshold method
+    binarization_topk: Optional[int] = None  # Auto-set to k if None
 
     # Loss weights
     alpha: float = 1.0          # SAE reconstruction
@@ -156,11 +156,16 @@ class SAELogicAgent(nn.Module):
         z_sparse, z_pre = self.sae.encode(x)
 
         # Binarize features for logic
+        # If topk method and topk not specified, use SAE's k value
+        topk_val = self.config.binarization_topk
+        if self.config.binarization_method == "topk" and topk_val is None:
+            topk_val = self.config.k
+
         binary_features = binarize_sae_features(
             z_sparse,
             method=self.config.binarization_method,
             threshold=self.config.binarization_threshold,
-            top_k=self.config.binarization_topk
+            top_k=topk_val
         )
 
         # Logic layer
@@ -407,6 +412,21 @@ def train_joint(
             config.initial_temp * (config.temp_decay ** epoch)
         )
         model.logic_layer.update_temperature(current_temp)
+
+        # Debug: Print feature statistics on first epoch
+        if epoch == 0:
+            with torch.no_grad():
+                batch_x, batch_a = next(iter(train_loader))
+                batch_x = batch_x.to(device)
+                z_sparse, _ = model.sae.encode(batch_x)
+                topk_val = config.binarization_topk if config.binarization_topk else config.k
+                binary_features = binarize_sae_features(
+                    z_sparse, config.binarization_method, config.binarization_threshold, topk_val
+                )
+                print(f"\n[Debug] Feature stats (first batch):")
+                print(f"  SAE features: min={z_sparse.min():.4f}, max={z_sparse.max():.4f}, mean={z_sparse.mean():.4f}")
+                print(f"  Binary features: density={binary_features.mean():.4f}, sum/sample={binary_features.sum(1).mean():.1f}")
+                print(f"  Binarization: method={config.binarization_method}, threshold={config.binarization_threshold}, topk={topk_val}\n")
 
         # Optionally freeze SAE after warmup
         if epoch == config.sae_freeze_epoch:
