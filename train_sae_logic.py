@@ -551,8 +551,16 @@ def main(args):
 
     print(f"\n✓ Training complete! Best validation accuracy: {best_acc:.3f}")
 
-    # Load best model
-    model.load_state_dict(best_state['model'])
+    # Load best model (handle case where no improvement occurred)
+    if best_state is not None:
+        model.load_state_dict(best_state['model'])
+    else:
+        print("\n⚠ Warning: No improvement during training. Using final model state.")
+        best_state = {
+            'model': model.state_dict(),
+            'epoch': config.n_epochs - 1,
+            'val_acc': best_acc
+        }
 
     # Extract rules
     print("\nExtracting rules...")

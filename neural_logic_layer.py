@@ -130,34 +130,31 @@ class LearnableNeuralLogicLayer(nn.Module):
         """
         batch_size = features.shape[0]
 
-        # Separate positive and negative literals
-        pos_mask = (clause_weight > 0).float()
-        neg_mask = (clause_weight < 0).float()
-
-        # For positive literals: use feature values weighted by clause weight
-        # For negative literals: use (1 - feature) weighted by |clause weight|
-        pos_literals = features * pos_mask * clause_weight.abs()
-        neg_literals = (1 - features) * neg_mask * clause_weight.abs()
-
-        # Combine all active literals
-        all_literals = pos_literals + neg_literals
-
         # Only consider non-zero weighted features
-        active_mask = (clause_weight.abs() > 1e-6).float()
+        active_mask = (clause_weight.abs() > 1e-6)
 
-        if active_mask.sum() < 1e-6:
+        if active_mask.sum() == 0:
             # Empty clause = always satisfied
             return torch.ones(batch_size, device=features.device)
 
-        # AND via product t-norm: multiply all literal satisfactions
-        # We need to mask out the inactive features (set them to 1 for product)
-        masked_literals = torch.where(
-            active_mask.bool(),
-            all_literals,
-            torch.ones_like(all_literals)
+        # Get literal values for active features
+        # For positive weight: use feature value
+        # For negative weight: use (1 - feature)
+        literal_values = torch.where(
+            clause_weight > 0,
+            features,  # positive literal
+            1 - features  # negative literal
         )
 
-        # Product over all features
+        # Mask out inactive features (set to 1 so they don't affect product)
+        masked_literals = torch.where(
+            active_mask.unsqueeze(0).expand(batch_size, -1),
+            literal_values,
+            torch.ones_like(literal_values)
+        )
+
+        # AND via product t-norm: multiply all active literals
+        # Shape: (batch, n_features) -> (batch,)
         satisfaction = masked_literals.prod(dim=1)
 
         return satisfaction
