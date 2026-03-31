@@ -155,11 +155,13 @@ class LearnableNeuralLogicLayer(nn.Module):
         # Shape: (batch, n_features) -> (batch, n_active)
         active_literals = literal_values[:, active_mask]
 
-        # Soft AND using product t-norm (standard fuzzy logic)
-        # prod(x_i) is differentiable and approximates min(x_i)
-        # Add small epsilon to avoid vanishing gradients with many literals
-        eps = 1e-8
-        satisfaction = torch.prod(active_literals + eps, dim=1)
+        # Soft AND using temperature-scaled weighted minimum
+        # This is differentiable and approximates min as temp → 0
+        temp = self.temperature.clamp(min=0.1)
+
+        # Softmin: weighted average where smaller values get exponentially more weight
+        weights = F.softmax(-active_literals / temp, dim=1)
+        satisfaction = (weights * active_literals).sum(dim=1)
 
         # Clamp to [0, 1] range
         satisfaction = satisfaction.clamp(0.0, 1.0)

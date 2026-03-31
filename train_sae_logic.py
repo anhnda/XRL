@@ -158,9 +158,9 @@ class SAELogicAgent(nn.Module):
         # Prepare features for logic layer
         if self.training:
             # During training: use continuous features (with gradients)
-            # Normalize to [0, 1] range: z / (z + 1) for soft binarization
-            # This maps: 0 → 0, large positive → 1, preserves gradients
-            logic_features = z_sparse / (z_sparse + 1.0)
+            # Use sigmoid with scaling: 0 → ~0, 1 → 0.5, 2+ → ~1
+            # Shift by -1 so that z=0 maps to sigmoid(-inf) ≈ 0
+            logic_features = torch.sigmoid((z_sparse - 1.0) * 3.0)
         else:
             # At inference: use hard binary features (interpretable)
             topk_val = self.config.binarization_topk
