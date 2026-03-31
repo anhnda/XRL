@@ -104,9 +104,15 @@ class LearnableNeuralLogicLayer(nn.Module):
         mask = self.sample_mask()
 
         if self.training:
-            # Soft ternary during training using tanh with temperature
+            # Use straight-through estimator: hard weights, soft gradients
+            # Forward: use hard ternary (sign)
+            # Backward: use soft gradients (tanh)
             ternary_soft = torch.tanh(self.clause_weights / (self.temperature + 1e-8))
-            return ternary_soft * mask
+            ternary_hard = torch.sign(self.clause_weights)
+
+            # Straight-through: hard in forward, but gradient flows through soft
+            ternary = ternary_hard.detach() + ternary_soft - ternary_soft.detach()
+            return ternary * mask
         else:
             # Hard ternary at inference
             ternary_hard = torch.sign(self.clause_weights)
@@ -155,15 +161,17 @@ class LearnableNeuralLogicLayer(nn.Module):
         active_literals = literal_values[:, active_mask]
 
         # Soft AND using smooth minimum via LogSumExp
-        # smooth_min(x) = -temp * logsumexp(-x / temp)
-        # For temp → 0, this → min(x) (hard AND)
-        # For temp → ∞, this → mean(x)
+        # smooth_min(x) ≈ -logsumexp(-x / temp) * temp
+        # For small temp → min(x) (hard AND)
+        # For large temp → mean(x)
         temp = self.temperature.clamp(min=0.1)
 
-        # Compute soft minimum
-        # satisfaction = -temp * torch.logsumexp(-active_literals / temp, dim=1)
-        # Simplified: Use weighted mean (more stable, still differentiable)
-        satisfaction = active_literals.mean(dim=1)
+        # Smooth minimum using LSE (more principled than mean)
+        # Add small epsilon for numerical stability
+        satisfaction = -temp * torch.logsumexp(-active_literals / (temp + 1e-8), dim=1)
+
+        # Clamp to [0, 1] range
+        satisfaction = satisfaction.clamp(0.0, 1.0)
 
         return satisfaction
 
