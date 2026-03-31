@@ -201,7 +201,7 @@ class LearnableNeuralLogicLayer(nn.Module):
         """
         Forward pass: features → clause satisfaction → action scores
 
-        Uses hard logic + straight-through estimator for better gradient flow
+        Uses soft logic during training for gradients, hard logic at inference
 
         Args:
             features: (batch, n_features) binary or continuous SAE features
@@ -212,14 +212,19 @@ class LearnableNeuralLogicLayer(nn.Module):
         batch_size = features.shape[0]
         clause_weights = self.get_clause_weights()
 
-        # Evaluate all clauses using HARD logic
-        # but gradients flow through clause_weights via straight-through
+        # Evaluate all clauses
         clause_sat = torch.zeros(batch_size, self.n_clauses, device=features.device)
 
-        for j in range(self.n_clauses):
-            clause_sat[:, j] = self.evaluate_clause_hard(features, clause_weights[:, j])
+        if self.training:
+            # Use SOFT logic during training for gradients
+            for j in range(self.n_clauses):
+                clause_sat[:, j] = self.evaluate_clause_soft(features, clause_weights[:, j])
+        else:
+            # Use HARD logic at inference for interpretability
+            for j in range(self.n_clauses):
+                clause_sat[:, j] = self.evaluate_clause_hard(features, clause_weights[:, j])
 
-        # Aggregate clauses per action using OR (count satisfied clauses)
+        # Aggregate clauses per action using OR (sum of satisfied clauses)
         action_scores = torch.zeros(batch_size, self.n_actions, device=features.device)
 
         for a in range(self.n_actions):
@@ -229,8 +234,7 @@ class LearnableNeuralLogicLayer(nn.Module):
             if action_clauses.numel() == 0:
                 continue
 
-            # Count number of satisfied clauses (more interpretable than probabilistic OR)
-            # This gives each action a score = number of rules that fire
+            # Sum clause satisfaction scores (soft OR during training, count at inference)
             action_scores[:, a] = action_clauses.sum(dim=1)
 
         return action_scores
