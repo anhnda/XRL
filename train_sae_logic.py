@@ -530,7 +530,16 @@ def main(args):
     if args.stage1_path and os.path.exists(args.stage1_path):
         print("Initializing SAE from Stage 1...")
         stage1_data = torch.load(args.stage1_path, weights_only=False)
-        init_from_stage1(model.sae, stage1_data, SAEConfig())
+
+        # Create SAEConfig matching the actual model dimensions
+        sae_config = SAEConfig(
+            input_dim=config.input_dim,
+            hidden_dim=config.hidden_dim,
+            k=config.k,
+            n_actions=config.n_actions,
+            use_ica_init=config.use_ica_init
+        )
+        init_from_stage1(model.sae, stage1_data, sae_config)
 
     # Train
     if args.mode == "two_stage":
