@@ -492,7 +492,7 @@ def main(args):
 
     # Load data
     print("\nLoading data...")
-    data = torch.load(args.features_path)
+    data = torch.load(args.features_path, weights_only=False)
     features = data['features']  # (N, input_dim)
     actions = data['actions']    # (N,)
 
@@ -529,7 +529,7 @@ def main(args):
     # Optionally initialize SAE from stage1
     if args.stage1_path and os.path.exists(args.stage1_path):
         print("Initializing SAE from Stage 1...")
-        stage1_data = torch.load(args.stage1_path)
+        stage1_data = torch.load(args.stage1_path, weights_only=False)
         init_from_stage1(model.sae, stage1_data, SAEConfig())
 
     # Train

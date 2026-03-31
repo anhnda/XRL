@@ -242,7 +242,7 @@ def main(args):
 
     # Load model
     print("Loading model...")
-    checkpoint = torch.load(args.model_path, map_location=device)
+    checkpoint = torch.load(args.model_path, map_location=device, weights_only=False)
 
     config_dict = checkpoint['config']
     config = SAELogicConfig(**config_dict)
@@ -255,7 +255,7 @@ def main(args):
 
     # Load data for fidelity evaluation
     print("\nLoading data...")
-    data = torch.load(args.features_path)
+    data = torch.load(args.features_path, weights_only=False)
     features = data['features']
     actions = data['actions']
 
