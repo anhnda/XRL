@@ -155,27 +155,46 @@ class SAELogicAgent(nn.Module):
         # SAE encoding
         z_sparse, z_pre = self.sae.encode(x)
 
-        # Binarize features for logic
-        # If topk method and topk not specified, use SAE's k value
-        topk_val = self.config.binarization_topk
-        if self.config.binarization_method == "topk" and topk_val is None:
-            topk_val = self.config.k
+        # Prepare features for logic layer
+        if self.training:
+            # During training: use continuous features (with gradients)
+            # Normalize to [0, 1] range: z / (z + 1) for soft binarization
+            # This maps: 0 → 0, large positive → 1, preserves gradients
+            logic_features = z_sparse / (z_sparse + 1.0)
+        else:
+            # At inference: use hard binary features (interpretable)
+            topk_val = self.config.binarization_topk
+            if self.config.binarization_method == "topk" and topk_val is None:
+                topk_val = self.config.k
 
-        binary_features = binarize_sae_features(
-            z_sparse,
-            method=self.config.binarization_method,
-            threshold=self.config.binarization_threshold,
-            top_k=topk_val
-        )
+            logic_features = binarize_sae_features(
+                z_sparse,
+                method=self.config.binarization_method,
+                threshold=self.config.binarization_threshold,
+                top_k=topk_val
+            )
 
         # Logic layer
-        action_logits = self.logic_layer(binary_features)
+        action_logits = self.logic_layer(logic_features)
 
         if return_features:
             x_recon = self.sae.decode(z_sparse)
+
+            # Compute binary features for monitoring
+            topk_val = self.config.binarization_topk
+            if self.config.binarization_method == "topk" and topk_val is None:
+                topk_val = self.config.k
+            binary_features = binarize_sae_features(
+                z_sparse,
+                method=self.config.binarization_method,
+                threshold=self.config.binarization_threshold,
+                top_k=topk_val
+            )
+
             return action_logits, {
                 'z_sparse': z_sparse,
                 'z_pre': z_pre,
+                'logic_features': logic_features,
                 'binary_features': binary_features,
                 'x_recon': x_recon
             }
