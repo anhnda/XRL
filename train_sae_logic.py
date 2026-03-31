@@ -65,8 +65,8 @@ class SAELogicConfig:
     # Logic layer parameters
     n_clauses_per_action: int = 10
     initial_temp: float = 5.0
-    min_temp: float = 0.1
-    temp_decay: float = 0.98  # Multiplicative decay per epoch
+    min_temp: float = 0.5  # Keep higher minimum for stability
+    temp_decay: float = 0.99  # Slower decay (was 0.98)
 
     # Feature binarization
     binarization_method: str = "topk"  # "threshold" or "topk"
@@ -378,8 +378,8 @@ def train_two_stage(
 
             train_info.append(info)
 
-        # Validation (use soft logic in first half for stability)
-        use_soft_eval = epoch < (config.n_epochs * 3 // 4)
+        # Validation (use soft logic in first 90% for stability)
+        use_soft_eval = epoch < (config.n_epochs * 9 // 10)
         val_acc = evaluate(model, val_loader, device, use_soft=use_soft_eval)
 
         if (epoch + 1) % config.log_every == 0:
@@ -476,8 +476,8 @@ def train_joint(
 
             train_info.append(info)
 
-        # Validation (use soft logic in first 75% of training for stability)
-        use_soft_eval = epoch < (config.n_epochs * 3 // 4)
+        # Validation (use soft logic in first 90% of training for stability)
+        use_soft_eval = epoch < (config.n_epochs * 9 // 10)
         val_acc = evaluate(model, val_loader, device, use_soft=use_soft_eval)
 
         if (epoch + 1) % config.log_every == 0:

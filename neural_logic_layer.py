@@ -54,8 +54,9 @@ class LearnableNeuralLogicLayer(nn.Module):
         # clause_weights[:, j] defines clause j
         # +1 = feature must be active, -1 = feature must be inactive, 0 = don't care
         # Initialize with larger values so sign() gives meaningful ternary weights
+        # Use larger std (3.0) so most weights start away from 0
         self.clause_weights = nn.Parameter(
-            torch.randn(n_features, self.n_clauses, device=device) * 2.0
+            torch.randn(n_features, self.n_clauses, device=device) * 3.0
         )
 
         # Learnable feature selection mask (which features to use in each clause)
@@ -104,10 +105,18 @@ class LearnableNeuralLogicLayer(nn.Module):
         mask = self.sample_mask()
 
         if self.training:
-            # Soft ternary during training using tanh with temperature
-            # As temperature decreases, tanh becomes sharper → closer to sign
+            # Gradually transition from soft to hard during training
+            # Use very sharp tanh that approximates sign
             ternary_soft = torch.tanh(self.clause_weights / (self.temperature + 1e-8))
-            return ternary_soft * mask
+
+            # When temperature is low (< 1), start using hard weights with straight-through
+            if self.temperature < 1.0:
+                ternary_hard = torch.sign(self.clause_weights)
+                # Straight-through estimator: hard forward, soft backward
+                ternary = ternary_hard.detach() - ternary_soft.detach() + ternary_soft
+                return ternary * mask
+            else:
+                return ternary_soft * mask
         else:
             # Hard ternary at inference
             ternary_hard = torch.sign(self.clause_weights)
