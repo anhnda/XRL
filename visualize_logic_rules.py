@@ -57,8 +57,8 @@ def load_model_and_data(model_path: str, features_path: str, stage1_path: Option
     actions  = data['actions']
 
     # Apply same normalization used at training time
-    feat_mean = ckpt.get('feature_mean', features.mean(0))
-    feat_std  = ckpt.get('feature_std',  features.std(0).clamp(min=1e-6))
+    feat_mean = ckpt.get('feature_mean', features.mean(0)).cpu()
+    feat_std  = ckpt.get('feature_std',  features.std(0).clamp(min=1e-6)).cpu()
     features  = (features - feat_mean) / feat_std
 
     print(f"  Samples: {len(features)}, dim: {features.shape[1]}")
@@ -424,13 +424,15 @@ def analyze_binarization(
 
     ax = axes[1]
     # Per-feature mean activation (sorted)
-    all_z_mat = torch.cat([b for (b,) in DataLoader(
-        TensorDataset(torch.cat([
-            model.bottleneck(model.sae.encode(bx.to(device))[0]).cpu()
-            for (bx,) in DataLoader(TensorDataset(features), batch_size=512)
-        ])), batch_size=99999
-    )]).numpy()
-    per_feature_mean = all_z_mat.mean(axis=0)
+    all_z_2d = []
+    with torch.no_grad():
+        for (bx,) in DataLoader(TensorDataset(features), batch_size=512):
+            bx = bx.to(device)
+            z_sparse, _ = model.sae.encode(bx)
+            z_bin = model.bottleneck(z_sparse)
+            all_z_2d.append(z_bin.cpu().numpy())
+    all_z_2d = np.concatenate(all_z_2d, axis=0)   # (N, n_features)
+    per_feature_mean = all_z_2d.mean(axis=0)
     sorted_means = np.sort(per_feature_mean)[::-1]
     ax.bar(range(len(sorted_means)), sorted_means, color='#5b8dd9', width=1.0)
     ax.set_xlabel("Feature index (sorted by mean activation)")
