@@ -53,7 +53,7 @@ class RulesAgent:
     def __init__(
         self,
         ppo_model: PPO,
-        logic_model: SAELogicAgentV2,
+        logic_model: SAELogicAgent3,
         device: str = "cpu",
     ):
         self.ppo_model   = ppo_model
@@ -113,7 +113,7 @@ def load_rules_agent(model_path: str, ppo_path: str, device: str) -> RulesAgent:
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
 
     config = SAELogicConfig(**ckpt['config'])
-    logic_model = SAELogicAgentV2(config, device=device)
+    logic_model = SAELogicAgentV3(config, device=device)
     logic_model.load_state_dict(ckpt['model_state'])
     logic_model.eval()
 
