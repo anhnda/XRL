@@ -337,6 +337,8 @@ class SAELogicConfig:
     bimodal_warmup: int = 30       # Epochs before bimodality loss starts
     bimodal_ramp: int = 50         # Epochs to ramp bimodality to max
 
+    # Per-class loss weights. Boost Done (index 6) to force rule learning.
+    action_class_weights: tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
     # Training mode
     training_mode: str = "joint"  # "two_stage" or "joint"
     sae_freeze_epoch: int = 80    # For joint: when to freeze SAE
@@ -471,8 +473,14 @@ class SAELogicAgentV2(nn.Module):
         action_logits, features = self.forward(x, return_features=True)
 
         # --- Action prediction loss ---
-        action_loss = F.cross_entropy(action_logits, actions)
-
+        # Build weight tensor on the correct device (cached via buffer would be
+        # cleaner, but constructing here is fine — it's tiny and fast).
+        class_weights = torch.tensor(
+            self.config.action_class_weights,
+            dtype=torch.float32,
+            device=x.device,
+        )
+        action_loss = F.cross_entropy(action_logits, actions, weight=class_weights)
         # --- SAE reconstruction loss ---
         recon_loss = F.mse_loss(features['x_recon'], x)
 
@@ -1039,6 +1047,9 @@ def main(args):
         bottleneck_lr=args.bottleneck_lr,
         # Freeze
         sae_freeze_epoch=args.sae_freeze_epoch,
+        # Class weights: Done (index 6) boosted
+        action_class_weights=tuple(args.action_class_weights),
+
     )
 
     # --- Create model ---
@@ -1211,6 +1222,13 @@ if __name__ == "__main__":
 
     # Output
     parser.add_argument("--save_dir", type=str, default="./sae_logic_v2_outputs")
-
+    parser.add_argument(
+            "--action_class_weights",
+            type=float,
+            nargs=7,
+            default=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            metavar=("TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"),
+            help="Per-action loss weights. Boost rare actions to force rule learning.",
+        )
     args = parser.parse_args()
     main(args)
