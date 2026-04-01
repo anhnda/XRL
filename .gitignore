@@ -10,6 +10,6 @@ venv/
 .claude
 result/
 .push.sh
-ppo_doorkey*
+#ppo_doorkey*
 concept_models
 concept_visualizations/*
