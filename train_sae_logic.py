@@ -66,9 +66,9 @@ class SigmoidBottleneck(nn.Module):
         super().__init__()
         # log_alpha so alpha is always positive via softplus
         self.log_alpha = nn.Parameter(
-                torch.full((n_features,), np.log(np.exp(3.0) - 1.0))  # alpha starts at 3
+            torch.full((n_features,), np.log(np.exp(initial_alpha) - 1.0))
         )
-        self.beta = nn.Parameter(torch.ones(n_features) * 0.5)  # instead of zeros
+        self.beta = nn.Parameter(torch.zeros(n_features))
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """
@@ -133,8 +133,9 @@ class ProductTNormLogicLayer(nn.Module):
         self.w_pos = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01)
         self.w_neg = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01)
 
-        # Per-clause importance weight (allows pruning entire clauses)
-        self.clause_weight = nn.Parameter(torch.ones(total_clauses) * 0.5)
+        # Per-clause bias (shifts the sigmoid activation threshold)
+        # Initialize positive so clauses start in the active region where gradients flow
+        self.clause_weight = nn.Parameter(torch.ones(total_clauses) * 2.0)
 
     def _get_selection_probs(self):
         """
@@ -153,6 +154,15 @@ class ProductTNormLogicLayer(nn.Module):
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """
+        Log-sum-sigmoid formulation for stable gradients.
+
+        Instead of clause = product(literals) which vanishes over 256 features,
+        we compute clause = sigmoid(sum(log(literals)) + bias).
+
+        This is monotonically related to the product t-norm but the outer sigmoid
+        prevents gradient vanishing by rescaling the output to [0, 1] with
+        guaranteed non-zero gradients.
+
         Args:
             features: (batch, n_features) values in [0, 1] from sigmoid bottleneck
 
@@ -162,12 +172,6 @@ class ProductTNormLogicLayer(nn.Module):
         batch_size = features.shape[0]
         p, n = self._get_selection_probs()  # each (total_clauses, n_features)
 
-        # Compute literal values for each clause and feature
-        # literal_ji = p * f_i + n * (1 - f_i) + (1 - p - n) * 1
-        #            = p * f_i + n - n * f_i + 1 - p - n
-        #            = (p - n) * f_i + (1 - p)
-        #            = 1 - p * (1 - f_i) - n * f_i
-        # More numerically stable form:
         f = features.unsqueeze(1)  # (batch, 1, n_features)
         p_expanded = p.unsqueeze(0)  # (1, total_clauses, n_features)
         n_expanded = n.unsqueeze(0)  # (1, total_clauses, n_features)
@@ -180,31 +184,21 @@ class ProductTNormLogicLayer(nn.Module):
         )
         # literals: (batch, total_clauses, n_features), each in [0, 1]
 
-        # Product t-norm AND: clause = product of literals across features
-        # Use log-sum for numerical stability
+        # Log-sum: equivalent to log(product) but we apply sigmoid after
         log_literals = torch.log(literals + 1e-8)
-        log_clauses = log_literals.sum(dim=-1)  # (batch, total_clauses)
-        clauses = torch.exp(log_clauses)  # (batch, total_clauses)
+        log_clause_sum = log_literals.sum(dim=-1)  # (batch, total_clauses)
 
-        # Apply clause importance weights
-        clause_w = torch.sigmoid(self.clause_weight)  # (total_clauses,)
-        weighted_clauses = clauses * clause_w.unsqueeze(0)  # (batch, total_clauses)
+        # Sigmoid with learnable bias — prevents vanishing gradient
+        # clause_weight acts as bias controlling activation threshold
+        clauses = torch.sigmoid(log_clause_sum + self.clause_weight.unsqueeze(0))
+        # clauses: (batch, total_clauses), each in [0, 1]
 
         # Reshape to (batch, n_actions, n_clauses_per_action)
-        weighted_clauses = weighted_clauses.view(
-            batch_size, self.n_actions, self.n_clauses_per_action
-        )
+        clauses = clauses.view(batch_size, self.n_actions, self.n_clauses_per_action)
 
-        # OR over clauses: probabilistic sum
-        # P(A or B) = 1 - (1 - A)(1 - B)
-        # For multiple: 1 - product(1 - clause_j)
-        neg_clauses = 1.0 - weighted_clauses + 1e-8
-        log_neg = torch.log(neg_clauses)
-        log_nor = log_neg.sum(dim=-1)  # (batch, n_actions)
-        action_scores = 1.0 - torch.exp(log_nor)  # (batch, n_actions)
-
-        # Convert to logits for cross-entropy (log-odds)
-        action_logits = torch.log(action_scores + 1e-8) - torch.log(1.0 - action_scores + 1e-8)
+        # OR over clauses: sum gives action logits directly
+        # Each clause in [0,1], sum gives "how many clauses fire"
+        action_logits = clauses.sum(dim=-1)  # (batch, n_actions)
 
         return action_logits
 
@@ -225,7 +219,6 @@ class ProductTNormLogicLayer(nn.Module):
         feature_names: Optional[List[str]] = None,
         action_names: Optional[List[str]] = None,
         threshold: float = 0.3,
-        min_clause_weight: float = 0.3,
     ) -> Dict[str, List[str]]:
         """
         Extract human-readable rules by thresholding selection probabilities.
@@ -234,7 +227,6 @@ class ProductTNormLogicLayer(nn.Module):
             feature_names: names for each feature dimension
             action_names: names for each action
             threshold: minimum selection probability to include a literal
-            min_clause_weight: minimum clause importance to include clause
 
         Returns:
             dict mapping action names to lists of clause strings
@@ -247,17 +239,13 @@ class ProductTNormLogicLayer(nn.Module):
         p, n = self._get_selection_probs()
         p = p.detach().cpu().numpy()
         n = n.detach().cpu().numpy()
-        clause_w = torch.sigmoid(self.clause_weight).detach().cpu().numpy()
+        clause_bias = self.clause_weight.detach().cpu().numpy()
 
         rules = {}
         for a in range(self.n_actions):
             clauses = []
             for c in range(self.n_clauses_per_action):
                 idx = a * self.n_clauses_per_action + c
-
-                # Skip low-weight clauses
-                if clause_w[idx] < min_clause_weight:
-                    continue
 
                 literals = []
                 for i in range(self.n_features):
@@ -268,7 +256,7 @@ class ProductTNormLogicLayer(nn.Module):
 
                 if literals:
                     clause_str = " ∧ ".join(literals)
-                    clauses.append(f"({clause_str}) [w={clause_w[idx]:.2f}]")
+                    clauses.append(f"({clause_str}) [bias={clause_bias[idx]:.2f}]")
 
             rules[action_names[a]] = clauses if clauses else ["(no active clauses)"]
 
@@ -277,7 +265,6 @@ class ProductTNormLogicLayer(nn.Module):
     def count_active_rules(
         self,
         threshold: float = 0.3,
-        min_clause_weight: float = 0.3,
         action_names: Optional[List[str]] = None,
     ) -> Dict:
         """Count statistics about active rules."""
@@ -287,7 +274,6 @@ class ProductTNormLogicLayer(nn.Module):
         p, n = self._get_selection_probs()
         p = p.detach().cpu().numpy()
         n = n.detach().cpu().numpy()
-        clause_w = torch.sigmoid(self.clause_weight).detach().cpu().numpy()
 
         total_clauses = 0
         non_empty = 0
@@ -298,8 +284,6 @@ class ProductTNormLogicLayer(nn.Module):
             action_clauses = 0
             for c in range(self.n_clauses_per_action):
                 idx = a * self.n_clauses_per_action + c
-                if clause_w[idx] < min_clause_weight:
-                    continue
 
                 n_literals = ((p[idx] > threshold) | (n[idx] > threshold)).sum()
                 total_clauses += 1
@@ -986,22 +970,11 @@ def main(args):
             use_ica_init=config.use_ica_init,
         )
         init_from_stage1(model.sae, stage1_data, sae_config)
-    # --- Data-driven bottleneck initialization ---
-    with torch.no_grad():
-        sample_batch = next(iter(train_loader))[0].to(device)
-        z_sparse, _ = model.sae.encode(sample_batch)
-        active_mean = z_sparse.sum(0) / (z_sparse > 0).float().sum(0).clamp(min=1)
-        model.bottleneck.beta.copy_(active_mean * 0.1)
-        
-        # Verify
-        z_binary = model.bottleneck(z_sparse)
-        print(f"  Bottleneck init: β mean={model.bottleneck.beta.mean():.3f}")
-        print(f"  After init: min={z_binary.min():.4f}, max={z_binary.max():.4f}")
-        print(f"  Near-binary: {((z_binary < 0.05) | (z_binary > 0.95)).float().mean():.3f}")
+
     # Print config
     print(f"\nConfig:")
     print(f"  Architecture: {config.input_dim} → SAE({config.hidden_dim}, k={config.k}) → "
-        f"Sigmoid → Logic({config.n_clauses_per_action} clauses/action) → {config.n_actions} actions")
+          f"Sigmoid → Logic({config.n_clauses_per_action} clauses/action) → {config.n_actions} actions")
     print(f"  Mode: {config.training_mode}")
     print(f"  Bimodality: warmup={config.bimodal_warmup}, ramp={config.bimodal_ramp}, max={config.bimodal_max}")
     print(f"  SAE freeze epoch: {config.sae_freeze_epoch}")
