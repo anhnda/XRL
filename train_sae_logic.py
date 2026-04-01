@@ -300,9 +300,8 @@ class SAELogicAgentV3(nn.Module):
                 z_mean[i] = 0.0
                 z_std[i] = 1.0
 
-        self.z_mean.copy_(z_mean)
-        self.z_std.copy_(z_std)
-
+        self.z_mean.copy_(z_mean.to(self.z_mean.device))
+        self.z_std.copy_(z_std.to(self.z_std.device))
         # Verify
         z_normed = (all_z - z_mean) / z_std
         # For active features, should be roughly centered
