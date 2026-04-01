@@ -97,7 +97,6 @@ Trains the full neuro-symbolic pipeline end-to-end. SAE and bottleneck are train
 python train_sae_logic.py \
     --features_path ./stage1_outputs/collected_data.pt \
     --stage1_path   ./stage1_outputs/stage1_outputs.pt \
-    --action_class_weights 1.0 1.0 1.0 1.0 1.0 1.0 10.0 \
     --mode joint \
     --n_epochs 200 \
     --save_dir ./sae_logic_v2_outputs
@@ -207,6 +206,9 @@ Toggle ←
 
 Pickup ←
     (f_56 ∧ f_67 ∧ f_87 ∧ f_89 ∧ ¬f_109 ∧ f_172 ∧ f_183 ∧ f_184 ∧ f_230) [bias=5.08]
+TurnRight←                                                
+    (f_4 ∧ f_10 ∧ f_28 ∧ f_32 ∧ f_36 ∧ f_44 ∧ f_56 ∧ f_68 ∧ ¬f_71 ∧ f_109 ∧ f_118 ∧ f_144 ∧ f_145 ∧ f_173 ∧ f_204 ∧ f_206 ∧ f_247 ∧ f_248)                                         
+
 ```
 
 Each rule is a conjunction of SAE feature activations. Positive literals (`f_i`) mean the feature must be active; negative literals (`¬f_i`) mean it must be inactive.
