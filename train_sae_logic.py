@@ -217,42 +217,31 @@ class ProductTNormLogicLayer(nn.Module):
         return action_logits
 
     def complexity_penalty(self) -> torch.Tensor:
-        """
-        L0-style penalty encouraging sparse clauses.
-        Penalizes the total selection probability (p + n) across all clauses and features.
-        """
         p, n = self._get_selection_probs()
-        usage = p + n  # (total_clauses, n_features)
-        penalty = self.l0_penalty_weight * usage.mean()
-        return penalty
+        return self.l0_penalty_weight * (p + n).mean()
 
     def diversity_penalty(self) -> torch.Tensor:
-        """
-        Penalizes cosine similarity between clause vectors of the same action.
-
-        For each action, computes pairwise cosine similarity between clause
-        selection-probability vectors (p + n). High similarity = duplicate clauses.
-        Minimizing this loss pushes clauses apart, forcing each one to capture
-        a distinct condition rather than collapsing to the same solution.
-
-        Returns scalar in [0, 1] — mean off-diagonal cosine similarity across actions.
-        """
         p, n = self._get_selection_probs()
         usage = p + n  # (total_clauses, n_features)
-        nc = self.n_clauses_per_action
-        loss = torch.tensor(0.0, device=usage.device)
 
-        for a in range(self.n_actions):
-            start = a * nc
-            U = usage[start:start+nc, :]                          # (nc, n_features)
-            norms = U.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            U_norm = U / norms                                     # (nc, n_features)
-            sim = U_norm @ U_norm.T                               # (nc, nc)
-            # Upper triangle only — avoids double-counting and the diagonal (self-sim=1)
-            mask = torch.triu(torch.ones(nc, nc, device=usage.device), diagonal=1).bool()
-            loss = loss + sim[mask].mean()
+        # Reshape to (n_actions, nc, n_features)
+        U = usage.view(self.n_actions, self.n_clauses_per_action, self.n_features)
 
-        return loss / self.n_actions
+        # Normalize each clause vector
+        norms = U.norm(dim=2, keepdim=True).clamp(min=1e-8)
+        U_norm = U / norms  # (n_actions, nc, n_features)
+
+        # Batch cosine similarity: (n_actions, nc, nc)
+        sim = torch.bmm(U_norm, U_norm.transpose(1, 2))
+
+        # Upper triangle mask — same for all actions, compute once
+        mask = torch.triu(
+            torch.ones(self.n_clauses_per_action, self.n_clauses_per_action,
+                    device=usage.device), diagonal=1
+        ).bool()
+
+        # Apply mask across all actions at once
+        return sim[:, mask].mean()
 
     def extract_rules(
         self,
