@@ -1106,13 +1106,19 @@ def main(args):
     print(f"\n{'='*70}")
     print("LEARNED RULES (DNF Form)")
     print(f"{'='*70}")
+    # for action_name, clauses in rules.items():
+    #     print(f"\n{action_name} ←")
+    #     for i, clause in enumerate(clauses):
+    #         print(f"    {clause}")
+    #         if i < len(clauses) - 1:
+    #             print("  ∨")
     for action_name, clauses in rules.items():
         print(f"\n{action_name} ←")
-        for i, clause in enumerate(clauses):
+        unique_clauses = list(dict.fromkeys(clauses))  # preserve order, remove dupes
+        for clause in unique_clauses:
             print(f"    {clause}")
-            if i < len(clauses) - 1:
+            if i < len(unique_clauses) - 1:
                 print("  ∨")
-
     # --- Check binarization quality ---
     print(f"\n{'='*70}")
     print("BINARIZATION QUALITY CHECK")
