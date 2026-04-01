@@ -120,8 +120,8 @@ def load_rules_agent(model_path: str, ppo_path: str, device: str) -> RulesAgent:
     config = SAELogicConfig(**config_dict)
     logic_model = SAELogicAgentV3(config, device=device)
     logic_model.load_state_dict(ckpt['model_state'])
+    logic_model.to(device)  # ← add this line
     logic_model.eval()
-
     # Restore input normalization stats
     feat_mean = ckpt['feature_mean'].to(device)
     feat_std  = ckpt['feature_std'].to(device)
