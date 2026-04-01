@@ -516,7 +516,7 @@ class SAELogicAgentV2(nn.Module):
             0.0001,
             0.1 * (1.0 - epoch / max(self.config.sae_freeze_epoch, 1))
         )
-        act_weight = min (50, 5 * (1+epoch * 0.1))
+        act_weight = min (10, (1+epoch * 0.1))
         # --- Total loss ---
         if self.config.training_mode == "joint" and epoch >= self.config.sae_freeze_epoch:
             # SAE frozen: only action + bimodality + logic
