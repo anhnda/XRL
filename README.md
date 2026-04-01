@@ -98,7 +98,7 @@ python train_sae_logic.py \
     --features_path ./stage1_outputs/collected_data.pt \
     --stage1_path   ./stage1_outputs/stage1_outputs.pt \
     --mode joint \
-    --n_epochs 200 \
+    --n_epochs 200 --k 20\
     --save_dir ./sae_logic_v2_outputs
 ```
 

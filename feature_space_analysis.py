@@ -239,7 +239,11 @@ def ica_analysis(X: np.ndarray, k: int, V_k: np.ndarray, n_runs: int = 5, seed: 
             f"kurtosis={kurt_values[idx]:+.2f}, "
             f"reliability={reliability[idx]:.3f}"
         )
-
+    # Canonicalize sign: make the max-absolute-value element positive per column
+    signs = np.sign(
+        ica_directions_d[np.abs(ica_directions_d).argmax(axis=0), np.arange(k)]
+    )
+    ica_directions_d *= signs[np.newaxis, :]
     return {
         "ica_directions": ica_directions_d,  # (d, k) in original space
         "mixing_matrix": A_ref,
