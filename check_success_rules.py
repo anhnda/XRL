@@ -53,7 +53,7 @@ class RulesAgent:
     def __init__(
         self,
         ppo_model: PPO,
-        logic_model: SAELogicAgent3,
+        logic_model: SAELogicAgentV3,
         device: str = "cpu",
     ):
         self.ppo_model   = ppo_model
