@@ -69,7 +69,7 @@ class SAEConfig:
     lambda2: float = 1e-3          # L1 on interaction weights W_int
     lambda3: float = 0.1           # Signal subspace regularization
     lambda4: float = 1.0           # Dead unit auxiliary loss weight
-
+    alpha_recon: float = 0.01
     # Dead unit resampling
     dead_threshold: float = 1e-3   # Activation freq below this = dead
     resample_every: int = 500      # Steps between resampling checks
