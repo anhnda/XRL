@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+from html import parser
 import os
 import json
 import warnings
@@ -477,9 +478,22 @@ def load_stage1_outputs(path):
 # ---------------------------------------------------------------------------
 # Data collection helper (reuses logic from ConceptExtractor)
 # ---------------------------------------------------------------------------
+def collect_features(model_path, env_name, n_episodes=800, seed=42,
+                      explore_eps=0.3):
+    """
+    Collect features and actions using DAgger-style diverse exploration.
 
-def collect_features(model_path, env_name, n_episodes=800, seed=42):
-    """Collect features and actions from a frozen PPO policy."""
+    At each step:
+      - With probability explore_eps: take a RANDOM action to reach diverse states
+      - With probability 1-explore_eps: follow PPO stochastically
+
+    Regardless of which action is TAKEN, the LABEL recorded is always what
+    PPO would deterministically do at that observation. This ensures:
+      - Diverse state coverage (random exploration reaches rare states)
+      - Clean expert labels (PPO tells us the right action at every state)
+      - Rare actions (TurnLeft, Done, Drop) appear whenever PPO would
+        choose them, even from states the pure PPO rarely visits.
+    """
     import gymnasium as gym
     import minigrid  # noqa: F401
     from minigrid.wrappers import ImgObsWrapper
@@ -487,8 +501,11 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42):
     from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
     from tqdm import tqdm
 
+    np.random.seed(seed)
+
     print(f"Loading PPO model from {model_path}...")
     model = PPO.load(model_path)
+    n_actions = model.action_space.n
 
     def make_env():
         def _init():
@@ -501,35 +518,63 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42):
     env = VecTransposeImage(env)
 
     features_list = []
-    actions_list = []
-
-    print(f"Collecting {n_episodes} episodes...")
-    obs = env.reset()
+    actions_list  = []
     episode_count = 0
+    random_steps  = 0
+    total_steps   = 0
+
+    print(f"Collecting {n_episodes} episodes (explore_eps={explore_eps})...")
+    obs = env.reset()
 
     with torch.no_grad():
         pbar = tqdm(total=n_episodes)
         while episode_count < n_episodes:
-            action, _ = model.predict(obs, deterministic=False)
+
             obs_tensor = torch.as_tensor(obs).float().to(model.device)
-            features = model.policy.features_extractor(obs_tensor)
-            features_list.append(features.cpu())
-            actions_list.append(torch.tensor(action))
-            obs, rewards, dones, infos = env.step(action)
+
+            # Features at current state
+            feats = model.policy.features_extractor(obs_tensor)
+
+            # Label: PPO's deterministic choice at this state
+            ppo_action, _ = model.predict(obs, deterministic=True)
+
+            # Behavior: random or stochastic PPO
+            if np.random.random() < explore_eps:
+                step_action = np.array([np.random.randint(n_actions)])
+                random_steps += 1
+            else:
+                step_action, _ = model.predict(obs, deterministic=False)
+
+            # Always record PPO label, not the step action
+            features_list.append(feats.cpu())
+            actions_list.append(torch.tensor(ppo_action))
+            total_steps += 1
+
+            obs, rewards, dones, infos = env.step(step_action)
+
             if dones[0]:
                 episode_count += 1
                 pbar.update(1)
                 obs = env.reset()
+
         pbar.close()
 
     env.close()
 
     features = torch.cat(features_list, dim=0)
-    actions = torch.cat(actions_list, dim=0)
+    actions  = torch.cat(actions_list,  dim=0)
+
     print(f"Collected {len(features)} samples, feature dim = {features.shape[1]}")
+    print(f"Random steps: {random_steps}/{total_steps} ({100.*random_steps/total_steps:.1f}%)")
+
+    action_names = ["TurnLeft","TurnRight","Forward","Pickup","Drop","Toggle","Done"]
+    counts = torch.bincount(actions, minlength=n_actions)
+    print("Label distribution after DAgger collection:")
+    for name, cnt in zip(action_names, counts):
+        bar = "█" * int(50 * cnt / len(actions))
+        print(f"  {name:10s}: {cnt:6d} ({100.*cnt/len(actions):5.1f}%) {bar}")
 
     return features, actions
-
 
 # ---------------------------------------------------------------------------
 # Main pipeline
@@ -622,7 +667,8 @@ def main():
                         help="Number of ICA runs for stability check")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="./stage1_outputs")
-
+    parser.add_argument("--explore_eps", type=float, default=0.3,
+                    help="Fraction of steps using random action for diverse state coverage")
     args = parser.parse_args()
 
     # Load or collect features
@@ -633,7 +679,8 @@ def main():
         actions = data["actions"]
     else:
         features, actions = collect_features(
-            args.model_path, args.env_name, args.n_episodes, args.seed
+            args.model_path, args.env_name, args.n_episodes, args.seed,
+            explore_eps=args.explore_eps
         )
         # Save raw collected data for reuse
         os.makedirs(args.save_dir, exist_ok=True)
