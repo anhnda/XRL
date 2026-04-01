@@ -66,9 +66,9 @@ class SigmoidBottleneck(nn.Module):
         super().__init__()
         # log_alpha so alpha is always positive via softplus
         self.log_alpha = nn.Parameter(
-            torch.full((n_features,), np.log(np.exp(initial_alpha) - 1.0))
+                torch.full((n_features,), np.log(np.exp(3.0) - 1.0))  # alpha starts at 3
         )
-        self.beta = nn.Parameter(torch.zeros(n_features))
+        self.beta = nn.Parameter(torch.ones(n_features) * 0.5)  # instead of zeros
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """
@@ -986,11 +986,22 @@ def main(args):
             use_ica_init=config.use_ica_init,
         )
         init_from_stage1(model.sae, stage1_data, sae_config)
-
+    # --- Data-driven bottleneck initialization ---
+    with torch.no_grad():
+        sample_batch = next(iter(train_loader))[0].to(device)
+        z_sparse, _ = model.sae.encode(sample_batch)
+        active_mean = z_sparse.sum(0) / (z_sparse > 0).float().sum(0).clamp(min=1)
+        model.bottleneck.beta.copy_(active_mean * 0.1)
+        
+        # Verify
+        z_binary = model.bottleneck(z_sparse)
+        print(f"  Bottleneck init: β mean={model.bottleneck.beta.mean():.3f}")
+        print(f"  After init: min={z_binary.min():.4f}, max={z_binary.max():.4f}")
+        print(f"  Near-binary: {((z_binary < 0.05) | (z_binary > 0.95)).float().mean():.3f}")
     # Print config
     print(f"\nConfig:")
     print(f"  Architecture: {config.input_dim} → SAE({config.hidden_dim}, k={config.k}) → "
-          f"Sigmoid → Logic({config.n_clauses_per_action} clauses/action) → {config.n_actions} actions")
+        f"Sigmoid → Logic({config.n_clauses_per_action} clauses/action) → {config.n_actions} actions")
     print(f"  Mode: {config.training_mode}")
     print(f"  Bimodality: warmup={config.bimodal_warmup}, ramp={config.bimodal_ramp}, max={config.bimodal_max}")
     print(f"  SAE freeze epoch: {config.sae_freeze_epoch}")
