@@ -848,6 +848,7 @@ def main(args):
     # ============================
     model.freeze_sae()
     model.compute_z_normalization(train_loader)
+    model.to(device)
 
     # ============================
     # STAGE 2: Train logic
