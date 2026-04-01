@@ -32,7 +32,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 from tqdm import tqdm
 
-from train_sae_logic_v2 import SAELogicAgentV2, SAELogicConfig
+from train_sae_logic import SAELogicAgentV2, SAELogicConfig
 
 ACTION_NAMES = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
 
