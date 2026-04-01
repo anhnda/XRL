@@ -117,7 +117,7 @@ def load_rules_agent(model_path: str, ppo_path: str, device: str) -> RulesAgent:
     logic_model.load_state_dict(ckpt['model_state'])
     logic_model.eval()
 
-    # Restore normalization stats
+    # Restore normalization stats — move to same device as model
     feat_mean = ckpt['feature_mean'].to(device)
     feat_std  = ckpt['feature_std'].to(device)
     logic_model.set_normalization(feat_mean, feat_std)
