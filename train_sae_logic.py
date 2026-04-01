@@ -317,7 +317,7 @@ class SAELogicConfig:
     n_actions: int = 7
 
     # Sigmoid bottleneck
-    initial_alpha: float = 1.0  # initial sharpness (increases via bimodality loss)
+    initial_alpha: float = 3.0  # initial sharpness (increases via bimodality loss)
 
     # Logic layer parameters
     n_clauses_per_action: int = 10
@@ -970,7 +970,17 @@ def main(args):
             use_ica_init=config.use_ica_init,
         )
         init_from_stage1(model.sae, stage1_data, sae_config)
+        with torch.no_grad():
+            sample_batch = next(iter(train_loader))[0].to(device)
+            z_sparse, _ = model.sae.encode(sample_batch)
+            active_mean = z_sparse.sum(0) / (z_sparse > 0).float().sum(0).clamp(min=1)
+            model.bottleneck.beta.copy_(active_mean * 0.1)
 
+            # Verify
+            z_binary = model.bottleneck(z_sparse)
+            print(f"  Bottleneck init: β mean={model.bottleneck.beta.mean():.3f}")
+            print(f"  After init: min={z_binary.min():.4f}, max={z_binary.max():.4f}")
+            print(f"  Near-binary: {((z_binary < 0.05) | (z_binary > 0.95)).float().mean():.3f}")
     # Print config
     print(f"\nConfig:")
     print(f"  Architecture: {config.input_dim} → SAE({config.hidden_dim}, k={config.k}) → "
