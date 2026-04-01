@@ -3,8 +3,22 @@ python feature_space_analysis.py \
     --env_name MiniGrid-DoorKey-5x5-v0 \
     --n_episodes 800 \
     --save_dir ./stage1_outputs
-
-
+python train_sae_logic.py \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --hidden_dim 256 --k 30 \
+    --n_clauses_per_action 10 \
+    --sae_pretrain_epochs 50 \
+    --n_epochs 200 \
+    --max_grad_norm 5.0
+python train_sae_logic.py \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --stage1_path ./stage1_outputs/stage1_outputs.pt \
+    --hidden_dim 300 --k 50 \
+    --n_clauses_per_action 10 \
+    --sae_pretrain_epochs 50 \
+    --n_epochs 400 \
+    --max_grad_norm 5.0
 Or if you've already collected features:
 pythonpython feature_space_analysis.py \
     --features_path ./collected_data.pt \
