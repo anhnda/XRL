@@ -130,11 +130,16 @@ class ProductTNormLogicLayer(nn.Module):
         # Learnable selection logits
         # w_pos[c, i]: logit for including feature i positively in clause c
         # w_neg[c, i]: logit for including feature i negated in clause c
-        self.w_pos = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01)
-        self.w_neg = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01)
+        # Initialize NEGATIVE so softmax strongly favors "absent" (third category).
+        # With w_pos=w_neg=-3, absent_logit=0: softmax gives p≈0.02, n≈0.02, absent≈0.95
+        # This means literal ≈ 1.0 for all features → log(literal) ≈ 0
+        # → log_clause_sum ≈ 0 → sigmoid(0 + bias) ≈ sigmoid(2) ≈ 0.88
+        # Clauses start active with good gradients, and learn which features to select.
+        self.w_pos = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01 - 3.0)
+        self.w_neg = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01 - 3.0)
 
         # Per-clause bias (shifts the sigmoid activation threshold)
-        # Initialize positive so clauses start in the active region where gradients flow
+        # With log_clause_sum ≈ 0 at init, bias=2 gives sigmoid(2)≈0.88
         self.clause_weight = nn.Parameter(torch.ones(total_clauses) * 2.0)
 
     def _get_selection_probs(self):
@@ -317,7 +322,7 @@ class SAELogicConfig:
     n_actions: int = 7
 
     # Sigmoid bottleneck
-    initial_alpha: float = 3.0  # initial sharpness (increases via bimodality loss)
+    initial_alpha: float = 1.0  # initial sharpness (increases via bimodality loss)
 
     # Logic layer parameters
     n_clauses_per_action: int = 10
@@ -970,17 +975,7 @@ def main(args):
             use_ica_init=config.use_ica_init,
         )
         init_from_stage1(model.sae, stage1_data, sae_config)
-        with torch.no_grad():
-            sample_batch = next(iter(train_loader))[0].to(device)
-            z_sparse, _ = model.sae.encode(sample_batch)
-            active_mean = z_sparse.sum(0) / (z_sparse > 0).float().sum(0).clamp(min=1)
-            model.bottleneck.beta.copy_(active_mean * 0.1)
 
-            # Verify
-            z_binary = model.bottleneck(z_sparse)
-            print(f"  Bottleneck init: β mean={model.bottleneck.beta.mean():.3f}")
-            print(f"  After init: min={z_binary.min():.4f}, max={z_binary.max():.4f}")
-            print(f"  Near-binary: {((z_binary < 0.05) | (z_binary > 0.95)).float().mean():.3f}")
     # Print config
     print(f"\nConfig:")
     print(f"  Architecture: {config.input_dim} → SAE({config.hidden_dim}, k={config.k}) → "
