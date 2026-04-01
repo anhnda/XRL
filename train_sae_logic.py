@@ -617,7 +617,7 @@ def train_two_stage(
 
             sae_optimizer.zero_grad()
             loss.backward()
-
+        
             with torch.no_grad():
                 model.sae._normalize_decoder()
 
@@ -751,7 +751,8 @@ def train_joint(
             if epoch < config.sae_freeze_epoch:
                 with torch.no_grad():
                     model.sae._normalize_decoder()
-
+            if (epoch + 1) % config.log_every == 0:
+                log_gradient_norms(model, epoch)
             optimizer.step()
             train_info.append(info)
 
@@ -800,7 +801,16 @@ def evaluate(model: SAELogicAgentV2, loader: DataLoader, device: str) -> float:
             total += batch_a.size(0)
 
     return correct / total
-
+def log_gradient_norms(model, epoch):
+    def _norm(params):
+        grads = [p.grad for p in params if p.grad is not None]
+        return torch.stack([g.norm(2) for g in grads]).norm(2).item() if grads else 0.0
+    print(
+        f"  [GradNorm] epoch={epoch} | "
+        f"SAE={_norm(model.sae.parameters()):.4f} | "
+        f"Bottleneck={_norm(model.bottleneck.parameters()):.4f} | "
+        f"Logic={_norm(model.logic_layer.parameters()):.4f}"
+    )
 
 def linear_probe(
     model: SAELogicAgentV2,
