@@ -366,7 +366,7 @@ class SAELogicConfig:
 
     # Loss weights
     alpha_recon: float = 1.0        # SAE reconstruction
-    beta_action: float = 2.0        # Action prediction
+    beta_action: float = 10.0        # Action prediction
     lambda_sparsity: float = 5e-3   # SAE L1 sparsity
     lambda_bimodal: float = 0.0     # Bimodality loss (annealed during training)
     bimodal_max: float = 1.0        # Maximum bimodality weight
