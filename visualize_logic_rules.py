@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from torch.utils.data import DataLoader, TensorDataset
 
-from train_sae_logic_v2 import SAELogicAgentV2, SAELogicConfig
+from train_sae_logic import SAELogicAgentV2, SAELogicConfig
 
 ACTION_NAMES = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
 
