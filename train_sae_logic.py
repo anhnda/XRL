@@ -481,7 +481,15 @@ class SAELogicAgentV2(nn.Module):
         )
         action_loss = F.cross_entropy(action_logits, actions, weight=class_weights)
         # --- SAE reconstruction loss ---
-        recon_loss = F.mse_loss(features['x_recon'], x)
+        # Only penalize reconstruction where SAE activated (z_sparse > 0 means that feature fired)
+        # Decode back to input space: active features already determine which input dims are explained
+        # active_mask = (features['z_sparse'] > 0).float()  # (batch, hidden_dim) — which concepts fired
+
+        # x_recon is already sparse-decoded. Just don't penalize dims where recon is zero.
+        active_input_mask = (features['x_recon'].abs() > 1e-6).float()  # (batch, input_dim)
+
+        recon_loss = (active_input_mask * (features['x_recon'] - x) ** 2).sum() / (active_input_mask.sum() + 1e-8)
+        # recon_loss = F.mse_loss(features['x_recon'], x)
 
         # --- SAE sparsity loss ---
         sparsity_loss = self.config.lambda_sparsity * features['z_pre'].abs().mean()
