@@ -795,6 +795,90 @@ def evaluate(model: SAELogicAgentV2, loader: DataLoader, device: str) -> float:
     return correct / total
 
 
+def linear_probe(
+    model: SAELogicAgentV2,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    device: str,
+    n_epochs: int = 50,
+    lr: float = 1e-3,
+):
+    """
+    Train a linear probe on bottleneck features to measure information content.
+    If this gets high accuracy, the SAE+bottleneck preserves action-relevant info
+    and the logic layer is the bottleneck.
+    """
+    print(f"\n{'='*70}")
+    print("LINEAR PROBE (information ceiling test)")
+    print(f"{'='*70}")
+
+    model.eval()
+    n_features = model.config.hidden_dim
+    n_actions = model.config.n_actions
+
+    # Extract bottleneck features
+    train_z, train_a = [], []
+    val_z, val_a = [], []
+
+    with torch.no_grad():
+        for batch_x, batch_a in train_loader:
+            batch_x = batch_x.to(device)
+            z_sparse, _ = model.sae.encode(batch_x)
+            z_binary = model.bottleneck(z_sparse)
+            train_z.append(z_binary.cpu())
+            train_a.append(batch_a)
+
+        for batch_x, batch_a in val_loader:
+            batch_x = batch_x.to(device)
+            z_sparse, _ = model.sae.encode(batch_x)
+            z_binary = model.bottleneck(z_sparse)
+            val_z.append(z_binary.cpu())
+            val_a.append(batch_a)
+
+    train_z = torch.cat(train_z, 0)
+    train_a = torch.cat(train_a, 0)
+    val_z = torch.cat(val_z, 0)
+    val_a = torch.cat(val_a, 0)
+
+    print(f"  Bottleneck features: {train_z.shape[1]}-d, "
+          f"near-binary: {((train_z < 0.05) | (train_z > 0.95)).float().mean():.3f}")
+
+    # Train linear probe
+    probe = nn.Linear(n_features, n_actions).to(device)
+    optimizer = torch.optim.Adam(probe.parameters(), lr=lr)
+
+    probe_train = DataLoader(
+        TensorDataset(train_z, train_a), batch_size=256, shuffle=True
+    )
+
+    for epoch in range(n_epochs):
+        probe.train()
+        for bz, ba in probe_train:
+            bz, ba = bz.to(device), ba.to(device)
+            loss = F.cross_entropy(probe(bz), ba)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+    # Evaluate
+    probe.eval()
+    with torch.no_grad():
+        train_preds = probe(train_z.to(device)).argmax(1).cpu()
+        val_preds = probe(val_z.to(device)).argmax(1).cpu()
+        train_acc = (train_preds == train_a).float().mean().item()
+        val_acc = (val_preds == val_a).float().mean().item()
+
+    print(f"  Linear probe train accuracy: {train_acc:.3f}")
+    print(f"  Linear probe val accuracy:   {val_acc:.3f}")
+
+    if val_acc > 0.7:
+        print(f"  → Bottleneck features contain enough info. Logic layer is the bottleneck.")
+    else:
+        print(f"  → Bottleneck features lost too much info. SAE/bottleneck needs improvement.")
+
+    return train_acc, val_acc
+
+
 # ============================================================================
 # Utilities
 # ============================================================================
@@ -1010,6 +1094,9 @@ def main(args):
             'epoch': config.n_epochs - 1,
             'val_acc': best_acc,
         }
+
+    # --- Linear probe to test information content ---
+    linear_probe(model, train_loader, val_loader, device)
 
     # --- Extract rules ---
     print("\nExtracting rules...")
