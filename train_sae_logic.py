@@ -1115,7 +1115,7 @@ def main(args):
     for action_name, clauses in rules.items():
         print(f"\n{action_name} ←")
         unique_clauses = list(dict.fromkeys(clauses))  # preserve order, remove dupes
-        for clause in unique_clauses:
+        for i, clause in enumerate(unique_clauses):
             print(f"    {clause}")
             if i < len(unique_clauses) - 1:
                 print("  ∨")
