@@ -65,8 +65,7 @@ Collects rollouts from the frozen PPO, runs SVD and ICA on the feature space, an
 python feature_space_analysis.py \
     --model_path ppo_doorkey_5x5.zip \
     --env_name   MiniGrid-DoorKey-5x5-v0 \
-    --n_episodes 2000 \
-    --explore_eps 0.3 \
+    --n_episodes 800 \
     --save_dir   ./stage1_outputs
 ```
 
