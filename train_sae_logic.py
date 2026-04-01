@@ -448,8 +448,7 @@ class SAELogicAgentV2(nn.Module):
         self.feature_std.copy_(std)
 
     def normalize(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize raw CNN features."""
-        return (x - self.feature_mean) / self.feature_std
+        return (x - self.feature_mean.to(x.device)) / self.feature_std.to(x.device)
 
     def forward(
         self,
