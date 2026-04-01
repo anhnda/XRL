@@ -438,7 +438,7 @@ def analyze_binarization(
             model.bottleneck(model.sae.encode(bx.to(device))[0]).cpu()
             for (bx,) in DataLoader(TensorDataset(features), batch_size=512)
         ])), batch_size=99999
-    )]).numpy()
+    )]).detach().numpy()
     per_feature_mean = all_z_mat.mean(axis=0)
     sorted_means = np.sort(per_feature_mean)[::-1]
     ax.bar(range(len(sorted_means)), sorted_means, color='#5b8dd9', width=1.0)
