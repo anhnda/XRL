@@ -1,20 +1,20 @@
 """
 check_success_rules.py
 ======================
-Evaluate the SAELogicAgentV2 (trained logic rules) by playing MiniGrid
+Evaluate the SAELogicAgentV3 (trained logic rules) by playing MiniGrid
 and measuring success rate. Compares against the original PPO baseline.
 
 Usage:
     # Rules agent only
     python check_success_rules.py \
-        --model_path ./sae_logic_v2_outputs/sae_logic_v2_model.pt \
+        --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
         --ppo_path   ppo_doorkey_5x5.zip \
         --env_name   MiniGrid-DoorKey-5x5-v0 \
         --n_episodes 100
 
     # Rules agent + PPO baseline comparison
     python check_success_rules.py \
-        --model_path ./sae_logic_v2_outputs/sae_logic_v2_model.pt \
+        --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
         --ppo_path   ppo_doorkey_5x5.zip \
         --compare_ppo
 """
@@ -43,11 +43,11 @@ ACTION_NAMES = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", 
 
 class RulesAgent:
     """
-    Wraps SAELogicAgentV2 for game-play evaluation.
+    Wraps SAELogicAgentV3 for game-play evaluation.
 
     Pipeline per step:
-        raw obs → PPO feature extractor → normalize → SAE encode
-                → sigmoid bottleneck → product t-norm logic → action
+        raw obs → PPO feature extractor → normalize_input → SAE encode
+                → fixed z-norm → sigmoid bottleneck → product t-norm logic → action
     """
 
     def __init__(
@@ -77,9 +77,9 @@ class RulesAgent:
             features = self.ppo_model.policy.features_extractor(obs_tensor)
 
             # Normalize using Stage 1 stats stored in the logic model
-            features_norm = self.logic_model.normalize(features)
+            features_norm = self.logic_model.normalize_input(features)
 
-            # SAE → bottleneck → logic → action
+            # SAE → fixed z-norm → bottleneck → logic → action
             action_logits = self.logic_model(features_norm)
             action = action_logits.argmax(dim=-1)
 
@@ -105,26 +105,37 @@ class RulesAgent:
 # ============================================================================
 
 def load_rules_agent(model_path: str, ppo_path: str, device: str) -> RulesAgent:
-    """Load SAELogicAgentV2 checkpoint and PPO feature extractor."""
+    """Load SAELogicAgentV3 checkpoint and PPO feature extractor."""
     print(f"Loading PPO from {ppo_path}...")
     ppo_model = PPO.load(ppo_path, device=device)
 
     print(f"Loading logic model from {model_path}...")
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
 
-    config = SAELogicConfig(**ckpt['config'])
+    # Handle tuple fields stored as lists in the checkpoint
+    config_dict = ckpt['config']
+    if 'action_class_weights' in config_dict and isinstance(config_dict['action_class_weights'], list):
+        config_dict['action_class_weights'] = tuple(config_dict['action_class_weights'])
+
+    config = SAELogicConfig(**config_dict)
     logic_model = SAELogicAgentV3(config, device=device)
     logic_model.load_state_dict(ckpt['model_state'])
     logic_model.eval()
 
-    # Restore normalization stats
+    # Restore input normalization stats
     feat_mean = ckpt['feature_mean'].to(device)
     feat_std  = ckpt['feature_std'].to(device)
     logic_model.set_normalization(feat_mean, feat_std)
 
+    # Restore SAE activation normalization stats (V3-specific)
+    if 'z_mean' in ckpt and 'z_std' in ckpt:
+        logic_model.z_mean.copy_(ckpt['z_mean'].to(device))
+        logic_model.z_std.copy_(ckpt['z_std'].to(device))
+
     print(f"  Val accuracy at save: {ckpt['best_val_acc']:.3f}")
     print(f"  Architecture: {config.input_dim}d → SAE({config.hidden_dim}, k={config.k})"
-          f" → Logic({config.n_clauses_per_action} clauses/action) → {config.n_actions} actions")
+          f" → FixedNorm → Sigmoid → Logic({config.n_clauses_per_action} clauses/action)"
+          f" → {config.n_actions} actions")
 
     return RulesAgent(ppo_model, logic_model, device)
 
@@ -345,11 +356,11 @@ def print_comparison(rules_results: dict, ppo_results: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate SAELogicAgentV2 logic rules by playing MiniGrid"
+        description="Evaluate SAELogicAgentV3 logic rules by playing MiniGrid"
     )
     parser.add_argument("--model_path",  type=str,
-                        default="./sae_logic_v2_outputs/sae_logic_v2_model.pt",
-                        help="Path to trained SAELogicAgentV2 checkpoint")
+                        default="./sae_logic_v3_outputs/sae_logic_v3_model.pt",
+                        help="Path to trained SAELogicAgentV3 checkpoint")
     parser.add_argument("--ppo_path",    type=str,
                         default="ppo_doorkey_5x5.zip",
                         help="Path to PPO model (for feature extraction and baseline)")
