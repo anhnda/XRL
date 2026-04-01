@@ -40,25 +40,26 @@ ACTION_NAMES = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", 
 # ============================================================================
 # Rules-based agent wrapper
 # ============================================================================
-
 class RulesAgent:
     """
     Wraps SAELogicAgentV2 for game-play evaluation.
 
     Pipeline per step:
         raw obs → PPO feature extractor → normalize → SAE encode
-                → sigmoid bottleneck → product t-norm logic → action
+                → sigmoid bottleneck → product t-norm logic → remap → MiniGrid action
     """
 
     def __init__(
         self,
         ppo_model: PPO,
         logic_model: SAELogicAgentV2,
-        device: str = "cpu",
+        device: str,
+        remap_back: dict,
     ):
         self.ppo_model   = ppo_model
         self.logic_model = logic_model
         self.device      = device
+        self.remap_back  = remap_back  # model 0-3 → MiniGrid action index
 
         self.logic_model.eval()
 
@@ -68,26 +69,30 @@ class RulesAgent:
             obs: raw observation from VecEnv, shape (1, C, H, W)
 
         Returns:
-            action array of shape (1,)
+            MiniGrid action array of shape (1,)
         """
         with torch.no_grad():
-            obs_tensor = torch.as_tensor(obs).float().to(self.device)
-
-            # PPO CNN feature extractor (frozen, same as training)
-            features = self.ppo_model.policy.features_extractor(obs_tensor)
-
-            # Normalize using Stage 1 stats stored in the logic model
+            obs_tensor    = torch.as_tensor(obs).float().to(self.device)
+            features      = self.ppo_model.policy.features_extractor(obs_tensor)
             features_norm = self.logic_model.normalize(features)
-
-            # SAE → bottleneck → logic → action
             action_logits = self.logic_model(features_norm)
-            action = action_logits.argmax(dim=-1)
+            action_model  = action_logits.argmax(dim=-1).item()
 
-        return action.cpu().numpy()
+        # Remap from model's compressed action space back to MiniGrid's full space
+        action_minigrid = self.remap_back[action_model]
+        return np.array([action_minigrid])
 
     def print_rules(self):
         """Print the learned rules being used."""
-        rules = self.logic_model.extract_rules(action_names=ACTION_NAMES)
+        action_names = list(self.remap_back.values())
+        # Build display names from remap
+        minigrid_names = {
+            0: "TurnLeft", 1: "TurnRight", 2: "Forward",
+            3: "Pickup",   4: "Drop",      5: "Toggle",  6: "Done"
+        }
+        display_names = [minigrid_names.get(v, str(v)) for v in sorted(self.remap_back.values())]
+        rules = self.logic_model.extract_rules(action_names=display_names)
+
         print("\n" + "=" * 60)
         print("ACTIVE LOGIC RULES")
         print("=" * 60)
@@ -100,10 +105,6 @@ class RulesAgent:
                     print("  ∨")
 
 
-# ============================================================================
-# Model loading
-# ============================================================================
-
 def load_rules_agent(model_path: str, ppo_path: str, device: str) -> RulesAgent:
     """Load SAELogicAgentV2 checkpoint and PPO feature extractor."""
     print(f"Loading PPO from {ppo_path}...")
@@ -112,22 +113,33 @@ def load_rules_agent(model_path: str, ppo_path: str, device: str) -> RulesAgent:
     print(f"Loading logic model from {model_path}...")
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
 
-    config = SAELogicConfig(**ckpt['config'])
+    config      = SAELogicConfig(**ckpt['config'])
     logic_model = SAELogicAgentV2(config, device=device)
     logic_model.load_state_dict(ckpt['model_state'])
+    logic_model.to(device)
     logic_model.eval()
 
-    # Restore normalization stats — move to same device as model
+    # Normalization stats — already on device after .to(device)
     feat_mean = ckpt['feature_mean'].to(device)
     feat_std  = ckpt['feature_std'].to(device)
     logic_model.set_normalization(feat_mean, feat_std)
 
-    print(f"  Val accuracy at save: {ckpt['best_val_acc']:.3f}")
-    print(f"  Architecture: {config.input_dim}d → SAE({config.hidden_dim}, k={config.k})"
-          f" → Logic({config.n_clauses_per_action} clauses/action) → {config.n_actions} actions")
+    # Load action remap saved during training, invert for game-play
+    # remap      : MiniGrid action → model index  e.g. {1:0, 2:1, 3:2, 5:3}
+    # remap_back : model index → MiniGrid action  e.g. {0:1, 1:2, 2:3, 3:5}
+    remap      = ckpt.get('action_remap', {1: 0, 2: 1, 3: 2, 5: 3})
+    remap_back = {v: k for k, v in remap.items()}
 
-    return RulesAgent(ppo_model, logic_model, device)
+    action_names = ckpt.get('action_names', ["TurnRight", "Forward", "Pickup", "Toggle"])
 
+    print(f"  Val accuracy at save : {ckpt['best_val_acc']:.3f}")
+    print(f"  Active actions       : {action_names}")
+    print(f"  Model→MiniGrid remap : {remap_back}")
+    print(f"  Architecture         : {config.input_dim}d → SAE({config.hidden_dim},"
+          f" k={config.k}) → Logic({config.n_clauses_per_action} clauses/action)"
+          f" → {config.n_actions} actions")
+
+    return RulesAgent(ppo_model, logic_model, device, remap_back)
 
 # ============================================================================
 # Environment factory

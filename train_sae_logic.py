@@ -1013,7 +1013,6 @@ def plot_training_history(history, save_dir):
 # ============================================================================
 # Main
 # ============================================================================
-
 def main(args):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -1030,13 +1029,12 @@ def main(args):
     actions  = data['actions']   # (N,)
     print(f"  Raw features: shape={features.shape}, range=[{features.min():.2f}, {features.max():.2f}]")
 
-    # Print class distribution so user can verify weights make sense
-    counts = torch.bincount(actions, minlength=7)
-    freqs  = counts.float() / counts.sum()
-    action_names_all = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
-    print("  Action distribution:")
-    for name, cnt, freq in zip(action_names_all, counts, freqs):
-        print(f"    {name:10s}: {cnt:6d} ({freq*100:5.1f}%)")
+    # Print raw class distribution before filtering
+    raw_counts = torch.bincount(actions, minlength=7)
+    raw_names  = ["TurnLeft","TurnRight","Forward","Pickup","Drop","Toggle","Done"]
+    print("  Raw action distribution:")
+    for name, cnt in zip(raw_names, raw_counts):
+        print(f"    {name:10s}: {cnt:6d} ({100.*cnt/len(actions):.1f}%)")
 
     # --- Load Stage 1 and normalize ---
     stage1_data = None
@@ -1046,17 +1044,37 @@ def main(args):
         feat_mean = stage1_data['feature_mean']
         feat_std  = stage1_data['feature_std']
         features  = (features - feat_mean) / feat_std
-        print(f"  Normalized features: range=[{features.min():.2f}, {features.max():.2f}], mean={features.mean():.4f}")
+        print(f"  Normalized: range=[{features.min():.2f}, {features.max():.2f}], mean={features.mean():.4f}")
     else:
         print("  WARNING: No stage1_path provided. Using raw features (not recommended).")
         feat_mean = features.mean(dim=0)
         feat_std  = features.std(dim=0).clamp(min=1e-6)
         features  = (features - feat_mean) / feat_std
-    print(f"  Normalized feature stats: mean={features.mean():.4f}, std={features.std():.4f}, "
-      f"min={features.min():.4f}, max={features.max():.4f}")
+
+    # --- Filter to active actions only ---
+    # PPO never uses TurnLeft(0), Drop(4), Done(6) in DoorKey-5x5.
+    # Those labels are noise from stochastic sampling — remove them.
+    # Remap remaining 4 actions to contiguous indices 0-3.
+    KEEP  = {1, 2, 3, 5}   # TurnRight=1, Forward=2, Pickup=3, Toggle=5
+    REMAP = {1: 0, 2: 1, 3: 2, 5: 3}
+    ACTION_NAMES = ["TurnRight", "Forward", "Pickup", "Toggle"]
+
+    mask     = torch.tensor([a.item() in KEEP for a in actions])
+    features = features[mask]
+    actions  = torch.tensor([REMAP[a.item()] for a in actions[mask]])
+
+    print(f"\n  After filtering: {len(features)} samples, {actions.max().item()+1} active actions")
+    print(f"  Action mapping: TurnRight→0, Forward→1, Pickup→2, Toggle→3")
+    filtered_counts = torch.bincount(actions, minlength=4)
+    for name, cnt in zip(ACTION_NAMES, filtered_counts):
+        bar = "█" * int(40 * cnt / len(actions))
+        print(f"    {name:10s}: {cnt:6d} ({100.*cnt/len(actions):5.1f}%) {bar}")
+
     # --- Train/val split ---
-    n_train = int(0.9 * len(features))
-    indices = torch.randperm(len(features), generator=torch.Generator().manual_seed(args.seed))
+    n_actions = int(actions.max().item() + 1)
+    n_train   = int(0.9 * len(features))
+    indices   = torch.randperm(len(features),
+                               generator=torch.Generator().manual_seed(args.seed))
 
     train_dataset = TensorDataset(features[indices[:n_train]], actions[indices[:n_train]])
     val_dataset   = TensorDataset(features[indices[n_train:]], actions[indices[n_train:]])
@@ -1064,14 +1082,14 @@ def main(args):
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size, shuffle=False)
 
-    print(f"  Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+    print(f"\n  Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
 
     # --- Create config ---
     config = SAELogicConfig(
         input_dim=features.shape[1],
         hidden_dim=args.hidden_dim,
         k=args.k,
-        n_actions=int(actions.max().item() + 1),
+        n_actions=n_actions,
         n_clauses_per_action=args.n_clauses_per_action,
         training_mode=args.mode,
         n_epochs=args.n_epochs,
@@ -1086,26 +1104,28 @@ def main(args):
         l0_penalty_weight=args.l0_penalty,
         lambda_sparsity=args.lambda_sparsity,
         lambda_diversity=args.lambda_diversity,
+        # Loss weights
+        alpha_recon=args.alpha_recon,
+        beta_action=args.beta_action,
         # Learning rates
         sae_lr=args.sae_lr,
         logic_lr=args.logic_lr,
         bottleneck_lr=args.bottleneck_lr,
         # Freeze schedule
         sae_freeze_epoch=args.sae_freeze_epoch,
-        # Class weights
-        action_class_weights=tuple(args.action_class_weights),
+        # Class weights — trim to actual n_actions
+        action_class_weights=tuple(args.action_class_weights[:n_actions]),
     )
 
     # --- Create model ---
     print("\nInitializing model...")
     model = SAELogicAgentV2(config, device=device)
-    model.set_normalization(feat_mean, feat_std)
+    model.set_normalization(feat_mean.to(device), feat_std.to(device))
 
     # Initialize SAE from Stage 1 ICA directions
     if stage1_data is not None and config.use_ica_init:
         print("Initializing SAE from Stage 1...")
         sae_config = SAEConfig(
-            alpha_recon=args.alpha_recon,
             input_dim=config.input_dim,
             hidden_dim=config.hidden_dim,
             k=config.k,
@@ -1115,14 +1135,16 @@ def main(args):
         init_from_stage1(model.sae, stage1_data, sae_config)
 
     print(f"\nConfig:")
-    print(f"  Architecture: {config.input_dim} → SAE({config.hidden_dim}, k={config.k}) → "
-          f"Sigmoid → Logic({config.n_clauses_per_action} clauses/action) → {config.n_actions} actions")
-    print(f"  Mode: {config.training_mode}")
-    print(f"  Class weights: {dict(zip(action_names_all, config.action_class_weights))}")
-    print(f"  Lambda diversity: {config.lambda_diversity}")
-    print(f"  L0 penalty: {config.l0_penalty_weight}")
-    print(f"  Bimodality: warmup={config.bimodal_warmup}, ramp={config.bimodal_ramp}, max={config.bimodal_max}")
-    print(f"  SAE freeze epoch: {config.sae_freeze_epoch}")
+    print(f"  Architecture : {config.input_dim}d → SAE({config.hidden_dim}, k={config.k})"
+          f" → Sigmoid → Logic({config.n_clauses_per_action} clauses/action)"
+          f" → {config.n_actions} actions")
+    print(f"  Mode         : {config.training_mode}")
+    print(f"  alpha_recon  : {config.alpha_recon}  beta_action: {config.beta_action}")
+    print(f"  Class weights: {dict(zip(ACTION_NAMES, config.action_class_weights))}")
+    print(f"  Diversity λ  : {config.lambda_diversity}  L0: {config.l0_penalty_weight}")
+    print(f"  Bimodality   : warmup={config.bimodal_warmup}, ramp={config.bimodal_ramp},"
+          f" max={config.bimodal_max}")
+    print(f"  SAE freeze   : epoch {config.sae_freeze_epoch}")
 
     # --- Train ---
     if args.mode == "two_stage":
@@ -1145,28 +1167,31 @@ def main(args):
         model.load_state_dict(best_state['model'])
     else:
         print("WARNING: No improvement during training.")
-        best_state = {'model': model.state_dict(), 'epoch': config.n_epochs - 1, 'val_acc': best_acc}
+        best_state = {
+            'model': model.state_dict(),
+            'epoch': config.n_epochs - 1,
+            'val_acc': best_acc,
+        }
 
     # --- Linear probe ---
     linear_probe(model, train_loader, val_loader, device)
 
     # --- Extract and print rules ---
     print("\nExtracting rules...")
-    action_names = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
-    rules = model.extract_rules(action_names=action_names)
+    rules = model.extract_rules(action_names=ACTION_NAMES)
 
     print(f"\n{'='*70}")
     print("LEARNED RULES (DNF Form)")
     print(f"{'='*70}")
     for action_name, clauses in rules.items():
         print(f"\n{action_name} ←")
-        unique_clauses = list(dict.fromkeys(clauses))  # deduplicate, preserve order
+        unique_clauses = list(dict.fromkeys(clauses))
         for i, clause in enumerate(unique_clauses):
             print(f"    {clause}")
             if i < len(unique_clauses) - 1:
                 print("  ∨")
 
-    # --- Binarization quality check ---
+    # --- Binarization quality ---
     print(f"\n{'='*70}")
     print("BINARIZATION QUALITY CHECK")
     print(f"{'='*70}")
@@ -1181,7 +1206,7 @@ def main(args):
         all_z = torch.cat(all_z, dim=0)
 
         near_01 = ((all_z < 0.05) | (all_z > 0.95)).float().mean()
-        near_05 = ((all_z > 0.4) & (all_z < 0.6)).float().mean()
+        near_05 = ((all_z > 0.4)  & (all_z < 0.6)).float().mean()
         print(f"  Values near {{0,1}} (within 0.05): {near_01:.3f}")
         print(f"  Values near 0.5 (ambiguous):     {near_05:.3f}")
         print(f"  Mean bottleneck value:           {all_z.mean():.4f}")
@@ -1191,11 +1216,14 @@ def main(args):
     save_path = os.path.join(args.save_dir, "sae_logic_v2_model.pt")
     torch.save({
         'model_state': best_state['model'],
-        'config': asdict(config),
-        'rules': rules,
+        'config':      asdict(config),
+        'rules':       rules,
         'best_val_acc': best_acc,
         'feature_mean': feat_mean,
-        'feature_std': feat_std,
+        'feature_std':  feat_std,
+        # Save remap so check_success_rules.py can invert it
+        'action_remap': REMAP,
+        'action_names': ACTION_NAMES,
     }, save_path)
 
     rules_path = os.path.join(args.save_dir, "learned_rules.json")
@@ -1204,7 +1232,7 @@ def main(args):
 
     plot_training_history(history, args.save_dir)
 
-    stats = model.logic_layer.count_active_rules(action_names=action_names)
+    stats = model.logic_layer.count_active_rules(action_names=ACTION_NAMES)
     print(f"\n{'='*70}")
     print("RULE STATISTICS")
     print(f"{'='*70}")
@@ -1215,61 +1243,64 @@ def main(args):
     for action, count in stats['clauses_per_action'].items():
         print(f"    {action}: {count}")
 
-    print(f"\n  Saved model: {save_path}")
-    print(f"  Saved rules: {rules_path}")
+    print(f"\n  Saved model : {save_path}")
+    print(f"  Saved rules : {rules_path}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train SAE + Product T-Norm Logic (V2)")
+    parser = argparse.ArgumentParser(description="Train SAE + Product T-Norm Logic")
 
     # Data
     parser.add_argument("--features_path", type=str, required=True)
     parser.add_argument("--stage1_path",   type=str, default=None)
 
     # Architecture
-    parser.add_argument("--hidden_dim",          type=int,   default=256)
-    parser.add_argument("--k",                   type=int,   default=10)
-    parser.add_argument("--n_clauses_per_action", type=int,  default=5)
+    parser.add_argument("--hidden_dim",           type=int,   default=256)
+    parser.add_argument("--k",                    type=int,   default=10)
+    parser.add_argument("--n_clauses_per_action", type=int,   default=5)
 
     # Training
-    parser.add_argument("--mode",       type=str, default="joint", choices=["two_stage", "joint"])
-    parser.add_argument("--n_epochs",   type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--seed",       type=int, default=42)
+    parser.add_argument("--mode",       type=str,   default="joint",
+                        choices=["two_stage", "joint"])
+    parser.add_argument("--n_epochs",   type=int,   default=200)
+    parser.add_argument("--batch_size", type=int,   default=256)
+    parser.add_argument("--seed",       type=int,   default=42)
 
     # Learning rates
     parser.add_argument("--sae_lr",        type=float, default=1e-3)
     parser.add_argument("--logic_lr",      type=float, default=3e-3)
     parser.add_argument("--bottleneck_lr", type=float, default=1e-3)
 
+    # Loss weights
+    parser.add_argument("--alpha_recon",  type=float, default=0.001)
+    parser.add_argument("--beta_action",  type=float, default=10.0)
+
     # Bimodality schedule
     parser.add_argument("--bimodal_max",    type=float, default=1.0)
-    parser.add_argument("--bimodal_warmup", type=int,   default=30)
-    parser.add_argument("--bimodal_ramp",   type=int,   default=50)
+    parser.add_argument("--bimodal_warmup", type=int,   default=60)
+    parser.add_argument("--bimodal_ramp",   type=int,   default=40)
 
     # Regularization
-    parser.add_argument("--l0_penalty",      type=float, default=1e-3)
-    parser.add_argument("--lambda_sparsity", type=float, default=5e-3)
-    parser.add_argument("--lambda_diversity",type=float, default=0.1,
-                        help="Weight for clause diversity penalty. "
-                             "Increase to 0.3-0.5 if duplicate clauses persist.")
+    parser.add_argument("--l0_penalty",       type=float, default=1e-3)
+    parser.add_argument("--lambda_sparsity",  type=float, default=1e-4)
+    parser.add_argument("--lambda_diversity", type=float, default=0.1)
 
-    # Freezing
-    parser.add_argument("--sae_freeze_epoch", type=int, default=80)
+    # Freeze schedule
+    parser.add_argument("--sae_freeze_epoch", type=int, default=100)
 
-    # Class weights
+    # Class weights (4 active actions: TurnRight, Forward, Pickup, Toggle)
     parser.add_argument(
         "--action_class_weights",
         type=float,
-        nargs=7,
-        default=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        metavar=("TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"),
-        help="Per-action loss weights. Boost rare actions to force rule learning. "
-             "Example: 5.0 1.0 1.0 1.0 5.0 1.0 10.0",
+        nargs="+",
+        default=[1.0, 1.0, 2.0, 2.0],
+        help="Per-action loss weights for active actions: "
+             "TurnRight Forward Pickup Toggle. "
+             "Boost Pickup/Toggle since they are rarer.",
     )
 
     # Output
     parser.add_argument("--save_dir", type=str, default="./sae_logic_v2_outputs")
-    parser.add_argument("--alpha_recon", type=float, default=0.01)
+
     args = parser.parse_args()
     main(args)
