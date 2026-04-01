@@ -1053,7 +1053,8 @@ def main(args):
         feat_mean = features.mean(dim=0)
         feat_std  = features.std(dim=0).clamp(min=1e-6)
         features  = (features - feat_mean) / feat_std
-
+    print(f"  Normalized feature stats: mean={features.mean():.4f}, std={features.std():.4f}, "
+      f"min={features.min():.4f}, max={features.max():.4f}")
     # --- Train/val split ---
     n_train = int(0.9 * len(features))
     indices = torch.randperm(len(features), generator=torch.Generator().manual_seed(args.seed))
@@ -1105,6 +1106,7 @@ def main(args):
     if stage1_data is not None and config.use_ica_init:
         print("Initializing SAE from Stage 1...")
         sae_config = SAEConfig(
+            alpha_recon=args.alpha_recon,
             input_dim=config.input_dim,
             hidden_dim=config.hidden_dim,
             k=config.k,
@@ -1269,6 +1271,6 @@ if __name__ == "__main__":
 
     # Output
     parser.add_argument("--save_dir", type=str, default="./sae_logic_v2_outputs")
-
+    parser.add_argument("--alpha_recon", type=float, default=0.01)
     args = parser.parse_args()
     main(args)
