@@ -747,10 +747,10 @@ def train_joint(
             optimizer.zero_grad()
             loss.backward()
 
-            # Normalize decoder columns
-            if epoch < config.sae_freeze_epoch:
-                with torch.no_grad():
-                    model.sae._normalize_decoder()
+            # # Normalize decoder columns
+            # if epoch < config.sae_freeze_epoch:
+            #     with torch.no_grad():
+            #         model.sae._normalize_decoder()
             if (epoch + 1) % config.log_every == 0:
                 log_gradient_norms(model, epoch)
             optimizer.step()
