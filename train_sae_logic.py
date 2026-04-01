@@ -512,7 +512,10 @@ class SAELogicAgentV2(nn.Module):
 
         # --- Logic complexity penalty ---
         logic_complexity = self.logic_layer.complexity_penalty()
-
+        recon_weight = max(
+            0.0001,
+            0.1 * (1.0 - epoch / max(self.config.sae_freeze_epoch, 1))
+        )
         # --- Total loss ---
         if self.config.training_mode == "joint" and epoch >= self.config.sae_freeze_epoch:
             # SAE frozen: only action + bimodality + logic
@@ -523,7 +526,7 @@ class SAELogicAgentV2(nn.Module):
             )
         else:
             total_loss = (
-                self.config.alpha_recon * recon_loss +
+                self.config.alpha_recon * recon_loss * recon_weight +
                 self.config.beta_action * action_loss +
                 sparsity_loss +
                 bimodal_loss +
