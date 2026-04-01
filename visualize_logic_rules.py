@@ -57,8 +57,8 @@ def load_model_and_data(model_path: str, features_path: str, stage1_path: Option
     actions  = data['actions']
 
     # Apply same normalization used at training time
-    feat_mean = ckpt.get('feature_mean', features.mean(0))
-    feat_std  = ckpt.get('feature_std',  features.std(0).clamp(min=1e-6))
+    feat_mean = ckpt.get('feature_mean', features.mean(0)).cpu()
+    feat_std  = ckpt.get('feature_std',  features.std(0).clamp(min=1e-6)).cpu()
     features  = (features - feat_mean) / feat_std
 
     print(f"  Samples: {len(features)}, dim: {features.shape[1]}")
