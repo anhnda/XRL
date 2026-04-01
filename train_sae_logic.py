@@ -329,7 +329,7 @@ class SAELogicConfig:
     l0_penalty_weight: float = 1e-4
 
     # Loss weights
-    alpha_recon: float = 0.05       # SAE reconstruction
+    alpha_recon: float = 0.001       # SAE reconstruction
     beta_action: float = 10.0       # Action prediction
     lambda_sparsity: float = 5e-3  # SAE L1 sparsity
     lambda_bimodal: float = 0.0    # Bimodality loss (annealed during training)
