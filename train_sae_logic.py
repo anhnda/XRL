@@ -329,8 +329,8 @@ class SAELogicConfig:
     l0_penalty_weight: float = 1e-4
 
     # Loss weights
-    alpha_recon: float = 0.01       # SAE reconstruction
-    beta_action: float = 10000.0       # Action prediction
+    alpha_recon: float = 0.1       # SAE reconstruction
+    beta_action: float = 5.0       # Action prediction
     lambda_sparsity: float = 5e-3  # SAE L1 sparsity
     lambda_bimodal: float = 0.0    # Bimodality loss (annealed during training)
     bimodal_max: float = 1.0       # Maximum bimodality weight
@@ -527,8 +527,8 @@ class SAELogicAgentV2(nn.Module):
             )
         else:
             total_loss = (
-                self.config.alpha_recon * recon_loss * recon_weight +
-                self.config.beta_action * action_loss * act_weight +
+                self.config.alpha_recon * recon_loss  +
+                self.config.beta_action * action_loss  +
                 sparsity_loss +
                 bimodal_loss +
                 logic_complexity
@@ -765,6 +765,9 @@ def train_joint(
             #         model.sae._normalize_decoder()
             # if (epoch + 1) % config.log_every == 0:
             #     log_gradient_norms(model, epoch)
+            torch.nn.utils.clip_grad_norm_(model.sae.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.bottleneck.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.logic_layer.parameters(), max_norm=1.0)
             optimizer.step()
             train_info.append(info)
 
