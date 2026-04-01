@@ -57,8 +57,8 @@ def load_model_and_data(model_path: str, features_path: str, stage1_path: Option
     actions  = data['actions']
 
     # Apply same normalization used at training time
-    feat_mean = ckpt.get('feature_mean', features.mean(0)).cpu()
-    feat_std  = ckpt.get('feature_std',  features.std(0).clamp(min=1e-6)).cpu()
+    feat_mean = ckpt.get('feature_mean', features.mean(0))
+    feat_std  = ckpt.get('feature_std',  features.std(0).clamp(min=1e-6))
     features  = (features - feat_mean) / feat_std
 
     print(f"  Samples: {len(features)}, dim: {features.shape[1]}")
@@ -115,12 +115,21 @@ def audit_class_balance(actions: torch.Tensor, save_dir: str) -> Dict:
 
 def get_selection_probs(model: SAELogicAgentV2) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Returns p, n each of shape (n_features, total_clauses).
-    These are the actual softmax probabilities, not raw weights.
+    Returns p, n each of shape (total_clauses, n_features).
+    _get_selection_probs() returns (total_clauses, n_features) — rows are clauses.
+    All downstream functions index accordingly: p[clause_idx, feature_idx].
     """
     with torch.no_grad():
         p, n = model.logic_layer._get_selection_probs()
-    return p.cpu().numpy(), n.cpu().numpy()
+    p, n = p.cpu().numpy(), n.cpu().numpy()
+    # Defensive: always ensure shape is (total_clauses, n_features)
+    total_clauses = model.config.n_actions * model.config.n_clauses_per_action
+    n_features    = model.config.hidden_dim
+    if p.shape == (n_features, total_clauses):
+        p, n = p.T, n.T   # transpose if returned the other way
+    assert p.shape == (total_clauses, n_features), \
+        f"Unexpected shape after normalisation: {p.shape}, expected ({total_clauses}, {n_features})"
+    return p, n
 
 
 # ============================================================================
@@ -133,8 +142,8 @@ def analyze_clause_diversity(model: SAELogicAgentV2, save_dir: str) -> Dict:
     selection-probability vectors.  Near-1.0 = duplicate clause.
     """
     p, n = get_selection_probs(model)
-    # Usage vector: how much each feature is used (positively or negatively)
-    usage = p + n  # (n_features, total_clauses)
+    # p, n shape: (total_clauses, n_features)
+    usage = p + n  # (total_clauses, n_features)
 
     n_actions = model.config.n_actions
     nc        = model.config.n_clauses_per_action
@@ -145,7 +154,7 @@ def analyze_clause_diversity(model: SAELogicAgentV2, save_dir: str) -> Dict:
 
     for a in range(n_actions):
         start = a * nc
-        U = usage[:, start:start+nc].T  # (nc, n_features)
+        U = usage[start:start+nc, :]  # (nc, n_features)
 
         # Cosine similarity matrix
         norms = np.linalg.norm(U, axis=1, keepdims=True) + 1e-8
@@ -206,8 +215,8 @@ def visualize_selection_probs(model: SAELogicAgentV2, save_dir: str):
 
     for a in range(n_actions):
         start = a * nc
-        p_a = p[:, start:start+nc].T   # (nc, n_features)
-        n_a = n[:, start:start+nc].T
+        p_a = p[start:start+nc, :]   # (nc, n_features)
+        n_a = n[start:start+nc, :]
 
         for col, (mat, label, cmap) in enumerate([(p_a, "P(positive)", "Blues"),
                                                    (n_a, "P(negative)", "Reds")]):
@@ -246,9 +255,9 @@ def analyze_feature_sharing(model: SAELogicAgentV2, threshold: float = 0.3, save
     action_feature_use = np.zeros((n_actions, n_features), dtype=bool)
     for a in range(n_actions):
         start = a * nc
-        p_a = p[:, start:start+nc]   # (n_features, nc)
-        n_a = n[:, start:start+nc]
-        action_feature_use[a] = ((p_a > threshold) | (n_a > threshold)).any(axis=1)
+        p_a = p[start:start+nc, :]   # (nc, n_features)
+        n_a = n[start:start+nc, :]   # (nc, n_features)
+        action_feature_use[a] = ((p_a > threshold) | (n_a > threshold)).any(axis=0)
 
     # How many actions use each feature?
     use_count = action_feature_use.sum(axis=0)  # (n_features,)
@@ -296,8 +305,8 @@ def analyze_feature_sharing(model: SAELogicAgentV2, threshold: float = 0.3, save
             sign_per_action = []
             for a in range(n_actions):
                 start = a * nc
-                p_f = p[f, start:start+nc].max()
-                n_f = n[f, start:start+nc].max()
+                p_f = p[start:start+nc, f].max()
+                n_f = n[start:start+nc, f].max()
                 if p_f > threshold:
                     sign_per_action.append(f"+{ACTION_NAMES[a]}")
                 elif n_f > threshold:
@@ -424,15 +433,13 @@ def analyze_binarization(
 
     ax = axes[1]
     # Per-feature mean activation (sorted)
-    all_z_2d = []
-    with torch.no_grad():
-        for (bx,) in DataLoader(TensorDataset(features), batch_size=512):
-            bx = bx.to(device)
-            z_sparse, _ = model.sae.encode(bx)
-            z_bin = model.bottleneck(z_sparse)
-            all_z_2d.append(z_bin.cpu().numpy())
-    all_z_2d = np.concatenate(all_z_2d, axis=0)   # (N, n_features)
-    per_feature_mean = all_z_2d.mean(axis=0)
+    all_z_mat = torch.cat([b for (b,) in DataLoader(
+        TensorDataset(torch.cat([
+            model.bottleneck(model.sae.encode(bx.to(device))[0]).cpu()
+            for (bx,) in DataLoader(TensorDataset(features), batch_size=512)
+        ])), batch_size=99999
+    )]).numpy()
+    per_feature_mean = all_z_mat.mean(axis=0)
     sorted_means = np.sort(per_feature_mean)[::-1]
     ax.bar(range(len(sorted_means)), sorted_means, color='#5b8dd9', width=1.0)
     ax.set_xlabel("Feature index (sorted by mean activation)")
