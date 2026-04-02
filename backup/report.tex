@@ -8,6 +8,8 @@
 \usepackage{xcolor}
 \usepackage{hyperref}
 \usepackage[margin=1in]{geometry}
+\usepackage{listings}
+\usepackage{verbatim}
 
 \title{\textbf{Automatic Rule Concept Surrogate for Deep Reinforcement Learning}}
 \author{Anonymous Authors}
@@ -18,7 +20,7 @@
 \maketitle
 
 \begin{abstract}
-Interpreting deep reinforcement learning (RL) policies remains a fundamental challenge in understanding agent behavior. We introduce \textbf{ARC} (Automatic Rule Concept surrogate), a framework that automatically extracts human-interpretable boolean rules from trained deep RL policies while maintaining high task performance (90--100\% success rate). Unlike prior methods that require manual concept specification or sacrifice accuracy for interpretability, ARC combines sparse autoencoders with product t-norm fuzzy logic to discover both the concepts and the logical rules governing agent decisions. Our two-stage training approach prevents gradient conflicts and produces concise, verifiable rules such as ``Forward $\leftarrow$ ($\neg f_{25} \land f_{26} \land \neg f_{81} \land \neg f_{91} \land \neg f_{280}$)'' that match or exceed the original policy's performance on MiniGrid environments.
+Interpreting deep reinforcement learning (RL) policies remains a fundamental challenge in understanding agent behavior. We introduce \textbf{ARC} (Automatic Rule Concept surrogate), a framework that automatically extracts human-interpretable boolean rules from trained deep RL policies while maintaining high task performance (90--100\% success rate). Unlike prior methods that require manual concept specification or sacrifice accuracy for interpretability, ARC combines sparse autoencoders with product t-norm fuzzy logic to discover both the concepts and the logical rules governing agent decisions. Our two-stage training approach prevents gradient conflicts and produces concise, verifiable rules such as ``Forward $\leftarrow$ ($\lnot f_{25} \land f_{26} \land \lnot f_{81} \land \lnot f_{91} \land \lnot f_{280}$)'' that match or exceed the original policy's performance on MiniGrid environments.
 \end{abstract}
 
 \section{Introduction}
@@ -44,7 +46,7 @@ Current interpretability methods face significant limitations:
 \begin{itemize}
 \item \textbf{Binary splits:} Each node splits on a single feature, creating deep trees for multi-variate rules
 \item \textbf{Accuracy degradation:} Shallow trees lose expressiveness; deep trees become uninterpretable hierarchies
-\item \textbf{Limited expressiveness:} Struggle to represent conjunctive rules like ``Pickup $\leftarrow$ ($f_1 \land f_2 \land \neg f_3 \land f_4$)'' compactly
+\item \textbf{Limited expressiveness:} Struggle to represent conjunctive rules like ``Pickup $\leftarrow$ ($f_1 \land f_2 \land \lnot f_3 \land f_4$)'' compactly
 \end{itemize}
 
 \subsection{Our Contribution: ARC Framework}
@@ -97,14 +99,14 @@ Raw observation --> CNN (frozen) --> Stage 1: SVD+ICA --> Normalize
                                          v
                           Stage 2B: Logic Training (SAE frozen)
                                          |
-                          Sigmoid Bottleneck: sigmoid(α(z - β))
+                          Sigmoid Bottleneck: sigmoid(alpha(z - beta))
                           [pushes to {0,1} via bimodality loss]
                                          |
                                          v
                           Product T-Norm Logic Layer (DNF)
                           Each action: OR(clause_1, ..., clause_n)
                           Each clause: AND over soft literals
-                          literal = p·f + n·(1-f) + (1-p-n)·1
+                          literal = p*f + n*(1-f) + (1-p-n)*1
                           [p, n from softmax]
                                          |
                                          v
@@ -268,24 +270,24 @@ Example extracted rules (bias terms indicate clause confidence):
 
 \begin{verbatim}
 TurnRight <-
-  (¬f_25 ∧ ¬f_26 ∧ f_81)
+  (~f_25 & ~f_26 & f_81)
   [bias=4.10, x10]
 
 Forward <-
-  (¬f_25 ∧ f_26 ∧ ¬f_81 ∧ ¬f_91 ∧ ¬f_280)
+  (~f_25 & f_26 & ~f_81 & ~f_91 & ~f_280)
   [bias=4.91, x10]
 
 Pickup <-
-  (f_22 ∧ f_25 ∧ f_26 ∧ ¬f_81 ∧ ¬f_195 ∧ f_255)
+  (f_22 & f_25 & f_26 & ~f_81 & ~f_195 & f_255)
   [bias=5.55, x10]
 
 Toggle <-
-  (¬f_22 ∧ f_25 ∧ ¬f_26 ∧ f_91 ∧ f_195
-   ∧ ¬f_255 ∧ f_280)
+  (~f_22 & f_25 & ~f_26 & f_91 & f_195
+   & ~f_255 & f_280)
   [bias=4.88, x10]
 \end{verbatim}
 
-Notation: $f_i$ is feature $i$, $\neg f_i$ is its negation. ``x10'' indicates 10 redundant clauses were merged (learned same literals but different bias). Bias $b_i$ controls clause threshold.
+Notation: $f_i$ is feature $i$, $\lnot f_i$ (or \texttt{\textasciitilde f\_i}) is its negation. ``x10'' indicates 10 redundant clauses were merged (learned same literals but different bias). Bias $b_i$ controls clause threshold.
 
 \textbf{Rule Characteristics:}
 \begin{itemize}
@@ -306,8 +308,8 @@ By visualizing maximally activating observations for each feature $f_i$, domain 
 This yields human-readable rules like:
 \begin{verbatim}
 Pickup <-
-  (key_visible ∧ door_in_view ∧ adjacent_to_object
-   ∧ ¬obstacle_ahead ∧ ...)
+  (key_visible & door_in_view & adjacent_to_object
+   & ~obstacle_ahead & ...)
 \end{verbatim}
 
 \section{Discussion}
