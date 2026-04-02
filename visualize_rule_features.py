@@ -147,16 +147,38 @@ def render_image_obs(obs: np.ndarray) -> np.ndarray:
 
 def smart_render(obs: np.ndarray, cell_size: int = 16) -> np.ndarray:
     """
-    Detect whether obs is a MiniGrid grid encoding or a raw image, render accordingly.
+    Render observation to RGB image.
+    Uses MiniGrid's own tile renderer if available (correct colors + orientation).
+    Falls back to custom renderer otherwise.
     """
+    # If it's already a large RGB image (pixel obs), just return it
+    if obs.ndim == 3 and obs.shape[0] > 20 and obs.shape[1] > 20 and obs.shape[2] == 3:
+        if obs.max() > 15:  # actual pixel values, not grid encoding
+            return render_image_obs(obs)
+    
+    # Check if it's a MiniGrid grid encoding (small integers in channel 0)
+    is_grid = False
     if obs.ndim == 3 and obs.shape[2] == 3:
-        # Check if values look like MiniGrid encoding (small integers 0-10 in channel 0)
-        if obs[:, :, 0].max() <= 15 and obs.dtype in (np.int64, np.int32, np.float32, np.float64, np.uint8):
+        if obs[:, :, 0].max() <= 15:
             unique_vals = np.unique(obs[:, :, 0])
-            if len(unique_vals) < 16 and unique_vals.max() <= 15:
-                return render_minigrid_obs(obs, cell_size)
+            if len(unique_vals) < 16:
+                is_grid = True
+    
+    if is_grid:
+        # Try MiniGrid's own renderer
+        try:
+            from minigrid.core.grid import Grid
+            grid, vis_mask = Grid.decode(obs)
+            img = grid.render(cell_size, agent_pos=(obs.shape[0] - 1, obs.shape[1] // 2),
+                              agent_dir=3, highlight_mask=vis_mask)
+            return img
+        except Exception:
+            pass
+        # Fallback to custom renderer
+        return render_minigrid_obs(obs, cell_size)
+    
+    # Handle other formats
     if obs.ndim == 3 and obs.shape[0] in (3, 1):
-        # CHW → HWC
         obs = np.transpose(obs, (1, 2, 0))
     if obs.ndim == 3 and obs.shape[2] == 1:
         obs = np.repeat(obs, 3, axis=2)
@@ -427,7 +449,7 @@ def plot_feature_topk(
             c = i % n_cols
             ax = fig.add_subplot(gs[row_offset + r, c])
             
-            img = smart_render(obs, cell_size=12)
+            img = smart_render(obs, cell_size=32)
             ax.imshow(img)
             ax.set_xticks([])
             ax.set_yticks([])
@@ -499,7 +521,7 @@ def plot_rule_summary(
         for col in range(n_examples):
             ax = axes[row, col]
             if col < len(obs_list):
-                img = smart_render(obs_list[col], cell_size=12)
+                img = smart_render(obs_list[col], cell_size=32)
                 ax.imshow(img)
             ax.set_xticks([])
             ax.set_yticks([])
@@ -672,44 +694,22 @@ def main():
     else:
         print(f"  Data marked as pre_normalized=True")
     
-    # Observations — prefer pixel-rendered (from MiniGrid renderer), fall back to grid encoding
-    observations = None       # for display
-    observations_grid = None  # for dedup hashing
-    
-    # Check for pixel observations first (MiniGrid's own renderer — correct colors + agent)
-    if 'observations_pixel' in data:
-        observations = data['observations_pixel']
-        if isinstance(observations, torch.Tensor):
-            observations = observations.numpy()
-        print(f"  Pixel observations (MiniGrid rendered): shape={observations.shape}")
-    
-    # Grid observations for dedup (small, hashable)
-    if 'observations' in data:
-        observations_grid = data['observations']
-        if isinstance(observations_grid, torch.Tensor):
-            observations_grid = observations_grid.numpy()
-        # If no pixel obs, use grid obs for display too
-        if observations is None:
-            observations = observations_grid
-            print(f"  Grid observations (will render): shape={observations.shape}")
-        else:
-            print(f"  Grid observations (for dedup): shape={observations_grid.shape}")
-    elif 'obs' in data:
-        observations_grid = data['obs']
-        if isinstance(observations_grid, torch.Tensor):
-            observations_grid = observations_grid.numpy()
-        if observations is None:
-            observations = observations_grid
-            print(f"  Observations (from 'obs'): shape={observations.shape}")
+    # Observations — load grid encoding, render via MiniGrid at display time
+    observations = None
+    for key in ['observations', 'obs']:
+        if key in data:
+            observations = data[key]
+            if isinstance(observations, torch.Tensor):
+                observations = observations.numpy()
+            print(f"  Observations ('{key}'): shape={observations.shape}, dtype={observations.dtype}")
+            break
     
     if observations is None:
         print("  WARNING: No observations found!")
         print(f"  Available keys: {list(data.keys())}")
-        print("  Will use feature vectors as placeholder (not visual).")
     
-    # Use grid obs for dedup if available, otherwise use pixel obs
-    if observations_grid is None:
-        observations_grid = observations
+    # observations_grid = same as observations, used for dedup hashing
+    observations_grid = observations
     
     action_names = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
     print(f"  Features: {features_tensor.shape}")
