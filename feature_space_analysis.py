@@ -369,8 +369,8 @@ def load_stage1_outputs(path):
 # Data collection — NOW WITH OBSERVATIONS
 # ---------------------------------------------------------------------------
 
-def collect_features(model_path, env_name, n_episodes=800, seed=42):
-    """Collect features, actions, AND grid observations from a frozen PPO policy."""
+def collect_features(model_path, env_name, n_episodes=800, seed=42, tile_size=8):
+    """Collect features, actions, grid obs, AND pixel-rendered observations."""
     import gymnasium as gym
     import minigrid  # noqa: F401
     from minigrid.wrappers import ImgObsWrapper
@@ -381,16 +381,13 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42):
     print(f"Loading PPO model from {model_path}...")
     model = PPO.load(model_path)
 
-    # Store a reference to the raw env via closure so we can grab grid obs.
-    # VecTransposeImage wraps DummyVecEnv — we can't reach the inner env
-    # through the wrapper chain, so we capture it at creation time.
     raw_env_ref = [None]
 
     def make_env():
         def _init():
-            env = gym.make(env_name)
+            env = gym.make(env_name, render_mode="rgb_array")
             env = ImgObsWrapper(env)
-            raw_env_ref[0] = env          # <-- capture reference
+            raw_env_ref[0] = env
             return env
         return _init
 
@@ -399,7 +396,8 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42):
 
     features_list = []
     actions_list = []
-    obs_list = []                          # <-- NEW
+    obs_grid_list = []
+    obs_pixel_list = []
 
     print(f"Collecting {n_episodes} episodes...")
     obs = env.reset()
@@ -408,14 +406,20 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42):
     with torch.no_grad():
         pbar = tqdm(total=n_episodes)
         while episode_count < n_episodes:
-            # Grab the MiniGrid grid observation (H, W, 3) before stepping.
-            # raw_env_ref[0] is the ImgObsWrapper; .unwrapped is the MiniGrid env.
-            # gen_obs()['image'] returns the agent's partial view as grid encoding.
+            raw_env = raw_env_ref[0].unwrapped
             try:
-                grid_obs = raw_env_ref[0].unwrapped.gen_obs()['image']
-                obs_list.append(grid_obs.copy())
+                # Grid encoding (for dedup / hashing)
+                grid_obs = raw_env.gen_obs()['image']
+                obs_grid_list.append(grid_obs.copy())
+
+                # Pixel render via MiniGrid's own renderer
+                # This handles orientation, agent marker, colors correctly
+                pixel_obs = raw_env.get_obs_render(grid_obs, tile_size=tile_size)
+                obs_pixel_list.append(pixel_obs)
             except Exception:
-                obs_list.append(np.zeros((7, 7, 3), dtype=np.uint8))
+                obs_grid_list.append(np.zeros((7, 7, 3), dtype=np.uint8))
+                obs_pixel_list.append(
+                    np.zeros((7 * tile_size, 7 * tile_size, 3), dtype=np.uint8))
 
             action, _ = model.predict(obs, deterministic=False)
             obs_tensor = torch.as_tensor(obs).float().to(model.device)
@@ -433,13 +437,14 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42):
 
     features = torch.cat(features_list, dim=0)
     actions = torch.cat(actions_list, dim=0)
-    observations = torch.tensor(np.stack(obs_list))   # <-- NEW
+    observations = torch.tensor(np.stack(obs_grid_list))
+    observations_pixel = torch.tensor(np.stack(obs_pixel_list))
 
     print(f"Collected {len(features)} samples, feature dim = {features.shape[1]}")
-    print(f"  Observations: {observations.shape}, "
-          f"unique obj types: {torch.unique(observations[:,:,:,0]).tolist()}")
+    print(f"  Grid observations: {observations.shape}")
+    print(f"  Pixel observations: {observations_pixel.shape}")
 
-    return features, actions, observations             # <-- CHANGED
+    return features, actions, observations, observations_pixel
 
 
 # ---------------------------------------------------------------------------
@@ -516,18 +521,20 @@ def main():
         features = data["features"]
         actions = data["actions"]
     else:
-        features, actions, observations = collect_features(       # <-- CHANGED
+        features, actions, observations, observations_pixel = collect_features(
             args.model_path, args.env_name, args.n_episodes, args.seed
         )
         os.makedirs(args.save_dir, exist_ok=True)
         raw_path = os.path.join(args.save_dir, "collected_data.pt")
-        torch.save({                                               # <-- CHANGED
+        torch.save({
             "features": features,
             "actions": actions,
-            "observations": observations,
+            "observations": observations,            # grid encoding (for dedup)
+            "observations_pixel": observations_pixel, # MiniGrid rendered (for display)
         }, raw_path)
         print(f"Raw data saved: {raw_path}")
-        print(f"  (includes observations: {observations.shape})")
+        print(f"  Grid obs: {observations.shape}")
+        print(f"  Pixel obs: {observations_pixel.shape}")
 
     stage1_data = run_stage1(
         features, actions,

@@ -131,25 +131,6 @@ def render_minigrid_obs(obs: np.ndarray, cell_size: int = 16) -> np.ndarray:
             img[y0, x0:x1] = np.minimum(base.astype(np.int32) - 30, 0).clip(0).astype(np.uint8)
             img[y0:y1, x0] = np.minimum(base.astype(np.int32) - 30, 0).clip(0).astype(np.uint8)
 
-    # ── Draw agent marker at bottom-center, facing up ──
-    agent_r, agent_c = H - 1, W // 2
-    cy = agent_r * cell_size + cell_size // 2
-    cx = agent_c * cell_size + cell_size // 2
-    s = max(cell_size // 3, 2)  # triangle half-size
-
-    # Draw upward-pointing triangle (red) 
-    agent_color = np.array([255, 50, 50], dtype=np.uint8)
-    for dy in range(-s, s + 1):
-        # Width of triangle at this row
-        row_y = cy + dy
-        if row_y < 0 or row_y >= img.shape[0]:
-            continue
-        # Triangle narrows toward top (dy = -s), widest at bottom (dy = +s)
-        half_w = max(0, int(s * (dy + s) / (2 * s)))
-        for dx in range(-half_w, half_w + 1):
-            col_x = cx + dx
-            if 0 <= col_x < img.shape[1]:
-                img[row_y, col_x] = agent_color
 
     return img
 
@@ -691,22 +672,44 @@ def main():
     else:
         print(f"  Data marked as pre_normalized=True")
     
-    # Observations — the key data for visualization
+    # Observations — prefer pixel-rendered (from MiniGrid renderer), fall back to grid encoding
+    observations = None       # for display
+    observations_grid = None  # for dedup hashing
+    
+    # Check for pixel observations first (MiniGrid's own renderer — correct colors + agent)
+    if 'observations_pixel' in data:
+        observations = data['observations_pixel']
+        if isinstance(observations, torch.Tensor):
+            observations = observations.numpy()
+        print(f"  Pixel observations (MiniGrid rendered): shape={observations.shape}")
+    
+    # Grid observations for dedup (small, hashable)
     if 'observations' in data:
-        observations = data['observations']
-        if isinstance(observations, torch.Tensor):
-            observations = observations.numpy()
-        print(f"  Observations: shape={observations.shape}, dtype={observations.dtype}")
+        observations_grid = data['observations']
+        if isinstance(observations_grid, torch.Tensor):
+            observations_grid = observations_grid.numpy()
+        # If no pixel obs, use grid obs for display too
+        if observations is None:
+            observations = observations_grid
+            print(f"  Grid observations (will render): shape={observations.shape}")
+        else:
+            print(f"  Grid observations (for dedup): shape={observations_grid.shape}")
     elif 'obs' in data:
-        observations = data['obs']
-        if isinstance(observations, torch.Tensor):
-            observations = observations.numpy()
-        print(f"  Observations (from 'obs'): shape={observations.shape}")
-    else:
-        print("  WARNING: No 'observations' key found in data!")
+        observations_grid = data['obs']
+        if isinstance(observations_grid, torch.Tensor):
+            observations_grid = observations_grid.numpy()
+        if observations is None:
+            observations = observations_grid
+            print(f"  Observations (from 'obs'): shape={observations.shape}")
+    
+    if observations is None:
+        print("  WARNING: No observations found!")
         print(f"  Available keys: {list(data.keys())}")
         print("  Will use feature vectors as placeholder (not visual).")
-        observations = None
+    
+    # Use grid obs for dedup if available, otherwise use pixel obs
+    if observations_grid is None:
+        observations_grid = observations
     
     action_names = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
     print(f"  Features: {features_tensor.shape}")
@@ -747,9 +750,9 @@ def main():
         z_sparse_col = all_z_sparse[:, fidx].numpy()
         
         # ── Select TOP-K unique observations ──
-        # Sort all by descending activation, then deduplicate by observation content
+        # Sort all by descending activation, then deduplicate by grid content
         sorted_top = np.argsort(z_bin_col)[::-1]
-        top_indices = _select_unique(sorted_top, observations, args.top_k)
+        top_indices = _select_unique(sorted_top, observations_grid, args.top_k)
         
         # ── Select BOTTOM-K unique observations ──
         # From samples where feature is clearly OFF (< 0.1), pick diverse ones
@@ -759,10 +762,10 @@ def main():
             # Shuffle for diversity, then deduplicate
             rng = np.random.RandomState(42 + fidx)
             rng.shuffle(off_candidates)
-            bottom_indices = _select_unique(off_candidates, observations, args.top_k)
+            bottom_indices = _select_unique(off_candidates, observations_grid, args.top_k)
         else:
             sorted_bot = np.argsort(z_bin_col)
-            bottom_indices = _select_unique(sorted_bot, observations, args.top_k)
+            bottom_indices = _select_unique(sorted_bot, observations_grid, args.top_k)
         
         top_act_values = z_bin_col[top_indices]
         bottom_act_values = z_bin_col[bottom_indices]
