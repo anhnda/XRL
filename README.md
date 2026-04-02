@@ -73,6 +73,28 @@ The two-stage design prevents gradient wars between SAE reconstruction and actio
 
 ## Pipeline
 
+# MiniGrid
+python feature_space_analysis.py \
+    --model_path ppo_doorkey_5x5.zip \
+    --env_name MiniGrid-DoorKey-5x5-v0 \
+    --save_dir ./stage1_minigrid
+
+python train_sae_logic.py \
+    --features_path ./stage1_minigrid/collected_data.pt \
+    --stage1_path   ./stage1_minigrid/stage1_outputs.pt \
+    --hidden_dim 300 --k 50
+
+# Atari
+python feature_space_analysis.py \
+    --model_path ppo_atari_breakout.zip \
+    --env_name "ALE/Breakout-v5" \
+    --n_episodes 200 \
+    --save_dir ./stage1_atari
+
+python train_sae_logic.py \
+    --features_path ./stage1_atari/collected_data.pt \
+    --stage1_path   ./stage1_atari/stage1_outputs.pt \
+    --hidden_dim 1024 --k 100
 
 DoorKey5x5
 

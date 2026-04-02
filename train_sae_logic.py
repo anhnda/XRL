@@ -1,11 +1,16 @@
 """
-SAE + Product T-Norm Neural Logic Training (V3 - Simplified)
-=============================================================
+SAE + Product T-Norm Neural Logic Training (V3 - Unified)
+==========================================================
+Supports both MiniGrid and Atari environments.
+The SAE + logic pipeline is fully environment-agnostic — it operates
+on collected feature vectors, so the only env-specific part is the
+action names displayed in outputs.
+
 Key insight: The original V2 worked at epoch 30 (93.4% val acc) before the
 SAE drifted. The fix is dead simple:
 
     1. Pre-train SAE alone (recon only) until it converges
-    2. FREEZE SAE completely  
+    2. FREEZE SAE completely
     3. Compute activation statistics from frozen SAE
     4. Apply FIXED normalization (not learned) between SAE and bottleneck
     5. Train bottleneck + logic on the frozen, normalized features
@@ -13,21 +18,31 @@ SAE drifted. The fix is dead simple:
 No learnable scaler. No gradient wars. The logic layer sees a stable feature
 space from the start.
 
-Usage:
-    python train_sae_logic_v3.py \
-        --features_path ./stage1_outputs/collected_data.pt \
-        --stage1_path ./stage1_outputs/stage1_outputs.pt \
-        --hidden_dim 300 --k 50 \
-        --n_clauses_per_action 10 \
-        --sae_pretrain_epochs 50 \
-        --n_epochs 400 \
+Usage (MiniGrid):
+    python train_sae_logic_v3.py \\
+        --features_path ./stage1_outputs/collected_data.pt \\
+        --stage1_path ./stage1_outputs/stage1_outputs.pt \\
+        --hidden_dim 300 --k 50 \\
+        --n_clauses_per_action 10 \\
+        --sae_pretrain_epochs 50 \\
+        --n_epochs 400 \\
         --save_dir ./sae_logic_v3_outputs
+
+Usage (Atari Breakout):
+    python train_sae_logic_v3.py \\
+        --features_path ./stage1_atari/collected_data.pt \\
+        --stage1_path ./stage1_atari/stage1_outputs.pt \\
+        --hidden_dim 1024 --k 100 \\
+        --n_clauses_per_action 10 \\
+        --sae_pretrain_epochs 50 \\
+        --n_epochs 400 \\
+        --save_dir ./sae_logic_atari
 """
 
 import argparse
 import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Optional, Dict, List
 
 import numpy as np
@@ -42,6 +57,38 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from sparse_concept_autoencoder import OvercompleteSAE, SAEConfig, init_from_stage1
+
+
+# ---------------------------------------------------------------------------
+# Default action names per env type (fallback if not in collected data)
+# ---------------------------------------------------------------------------
+
+DEFAULT_ACTION_NAMES = {
+    "minigrid": ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"],
+    "atari_4":  ["NOOP", "FIRE", "RIGHT", "LEFT"],                          # Breakout
+    "atari_6":  ["NOOP", "FIRE", "RIGHT", "LEFT", "RIGHTFIRE", "LEFTFIRE"], # Pong, SpaceInvaders
+}
+
+
+def get_action_names(n_actions: int, stored_names=None, env_type: str = None):
+    """
+    Resolve action names from (in priority order):
+      1. Names stored in the collected_data.pt file
+      2. Known defaults keyed on env_type + n_actions
+      3. Generic fallback: action_0, action_1, ...
+    """
+    if stored_names is not None:
+        if isinstance(stored_names, list) and len(stored_names) >= n_actions:
+            return stored_names[:n_actions]
+
+    if env_type == "minigrid" and n_actions <= 7:
+        return DEFAULT_ACTION_NAMES["minigrid"][:n_actions]
+    if env_type == "atari":
+        key = f"atari_{n_actions}"
+        if key in DEFAULT_ACTION_NAMES:
+            return DEFAULT_ACTION_NAMES[key]
+
+    return [f"action_{i}" for i in range(n_actions)]
 
 
 # ============================================================================
@@ -180,23 +227,20 @@ class SAELogicConfig:
     n_clauses_per_action: int = 10
     l0_penalty_weight: float = 1e-4
 
-    # Loss weights (Stage 2 only — Stage 1 is pure recon)
     beta_action: float = 5.0
     lambda_bimodal: float = 0.0
     bimodal_max: float = 0.3
-    bimodal_warmup: int = 30  # epochs into Stage 2
+    bimodal_warmup: int = 30
     bimodal_ramp: int = 80
 
-    action_class_weights: tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    action_class_weights: tuple = None  # None = uniform; set in main()
 
-    # Stage 1: SAE pre-training
     sae_pretrain_epochs: int = 50
     sae_lr: float = 1e-3
     lambda_sparsity: float = 5e-3
-    alpha_recon: float = 1.0  # full weight during pretraining
+    alpha_recon: float = 1.0
 
-    # Stage 2: Logic training
-    n_epochs: int = 400  # total epochs (stage 2 = n_epochs - sae_pretrain_epochs)
+    n_epochs: int = 400
     batch_size: int = 256
     logic_lr: float = 3e-3
     bottleneck_lr: float = 1e-3
@@ -207,22 +251,20 @@ class SAELogicConfig:
     log_every: int = 10
     save_dir: str = "./sae_logic_v3_outputs"
 
+    # Metadata (not used in training, kept for reproducibility)
+    env_name: str = "unknown"
+    env_type: str = "unknown"
+
+    def __post_init__(self):
+        if self.action_class_weights is None:
+            self.action_class_weights = tuple([1.0] * self.n_actions)
+
 
 # ============================================================================
 # Model
 # ============================================================================
 
 class SAELogicAgentV3(nn.Module):
-    """
-    Two-stage neuro-symbolic agent.
-    
-    Stage 1: SAE trained for reconstruction (frozen after convergence)
-    Stage 2: Fixed normalization → sigmoid bottleneck → product t-norm logic
-    
-    The key invariant: the logic layer ALWAYS sees features from the same
-    distribution. No moving targets.
-    """
-
     def __init__(self, config: SAELogicConfig, device: str = "cpu"):
         super().__init__()
         self.config = config
@@ -246,12 +288,8 @@ class SAELogicAgentV3(nn.Module):
             l0_penalty_weight=config.l0_penalty_weight,
         ).to(device)
 
-        # Input normalization (from Stage 1 data collection)
         self.register_buffer('feature_mean', torch.zeros(config.input_dim))
         self.register_buffer('feature_std', torch.ones(config.input_dim))
-
-        # SAE activation normalization (computed AFTER SAE pre-training)
-        # These are FIXED buffers, not learnable parameters
         self.register_buffer('z_mean', torch.zeros(config.hidden_dim))
         self.register_buffer('z_std', torch.ones(config.hidden_dim))
 
@@ -265,27 +303,17 @@ class SAELogicAgentV3(nn.Module):
         return (x - self.feature_mean) / self.feature_std
 
     def compute_z_normalization(self, loader: DataLoader):
-        """
-        Compute per-feature mean and std of SAE activations over the dataset.
-        
-        Only considers non-zero activations (since top-k makes most entries 0).
-        For features that are never active, std defaults to 1.0 (passthrough).
-        
-        Must be called AFTER SAE pretraining and BEFORE logic training.
-        """
         print("\n  Computing SAE activation statistics...")
         self.sae.eval()
-        
-        # Collect all activations
+
         all_z = []
         with torch.no_grad():
             for batch_x, _ in loader:
                 batch_x = batch_x.to(self.device)
                 z_sparse, _ = self.sae.encode(batch_x)
                 all_z.append(z_sparse.cpu())
-        all_z = torch.cat(all_z, 0)  # (N, hidden_dim)
+        all_z = torch.cat(all_z, 0)
 
-        # Compute stats per feature, only from non-zero activations
         z_mean = torch.zeros(self.config.hidden_dim)
         z_std = torch.ones(self.config.hidden_dim)
 
@@ -296,31 +324,26 @@ class SAELogicAgentV3(nn.Module):
                 z_mean[i] = active_nonzero.mean()
                 z_std[i] = active_nonzero.std().clamp(min=1e-3)
             else:
-                # Inactive feature — normalize to 0
                 z_mean[i] = 0.0
                 z_std[i] = 1.0
 
         self.z_mean.copy_(z_mean.to(self.z_mean.device))
         self.z_std.copy_(z_std.to(self.z_std.device))
-        # Verify
-        z_normed = (all_z - z_mean) / z_std
-        # For active features, should be roughly centered
+
         active_mask = all_z > 0
+        z_normed = (all_z - z_mean) / z_std
         active_normed = z_normed[active_mask]
-        print(f"    Raw SAE activations: mean={all_z[active_mask].mean():.2f}, "
-              f"std={all_z[active_mask].std():.2f}, "
-              f"max={all_z.max():.2f}")
-        print(f"    Normalized activations (active only): mean={active_normed.mean():.2f}, "
+        print(f"    Raw SAE activations (active): mean={all_z[active_mask].mean():.2f}, "
+              f"std={all_z[active_mask].std():.2f}, max={all_z.max():.2f}")
+        print(f"    Normalized (active): mean={active_normed.mean():.2f}, "
               f"std={active_normed.std():.2f}, "
               f"range=[{active_normed.min():.2f}, {active_normed.max():.2f}]")
         print(f"    Feature activity rate: {active_mask.float().mean():.3f}")
 
     def normalize_z(self, z: torch.Tensor) -> torch.Tensor:
-        """Fixed normalization of SAE activations."""
         return (z - self.z_mean) / self.z_std
 
     def freeze_sae(self):
-        """Freeze SAE parameters."""
         for param in self.sae.parameters():
             param.requires_grad = False
         self._sae_frozen = True
@@ -329,13 +352,9 @@ class SAELogicAgentV3(nn.Module):
     def forward(self, x, normalize_input=False, return_features=False):
         if normalize_input:
             x = self.normalize_input(x)
-
         z_sparse, z_pre = self.sae.encode(x)
-
-        # Fixed normalization → sigmoid bottleneck
         z_normed = self.normalize_z(z_sparse)
         z_binary = self.bottleneck(z_normed)
-
         action_logits = self.logic_layer(z_binary)
 
         if return_features:
@@ -360,13 +379,7 @@ class SAELogicAgentV3(nn.Module):
 # Stage 1: SAE Pre-training
 # ============================================================================
 
-def pretrain_sae(
-    model: SAELogicAgentV3,
-    train_loader: DataLoader,
-    config: SAELogicConfig,
-    device: str,
-):
-    """Pre-train SAE for reconstruction only. No action loss, no logic."""
+def pretrain_sae(model, train_loader, config, device):
     print("\n" + "=" * 70)
     print("STAGE 1: SAE PRE-TRAINING (reconstruction only)")
     print("=" * 70)
@@ -378,12 +391,10 @@ def pretrain_sae(
 
     for epoch in range(config.sae_pretrain_epochs):
         model.sae.train()
-        epoch_recon = []
-        epoch_sparsity = []
+        epoch_recon, epoch_sparsity = [], []
 
         for batch_x, _ in train_loader:
             batch_x = batch_x.to(device)
-
             z_sparse, z_pre = model.sae.encode(batch_x)
             x_recon = model.sae.decode(z_sparse)
 
@@ -393,10 +404,8 @@ def pretrain_sae(
 
             optimizer.zero_grad()
             loss.backward()
-
             with torch.no_grad():
                 model.sae._normalize_decoder()
-
             optimizer.step()
 
             epoch_recon.append(recon_loss.item())
@@ -405,10 +414,6 @@ def pretrain_sae(
         scheduler.step()
 
         if (epoch + 1) % config.log_every == 0:
-            mean_recon = np.mean(epoch_recon)
-            mean_sparse = np.mean(epoch_sparsity)
-
-            # Quick feature stats
             with torch.no_grad():
                 batch_x, _ = next(iter(train_loader))
                 batch_x = batch_x.to(device)
@@ -418,16 +423,14 @@ def pretrain_sae(
 
             print(
                 f"  Epoch {epoch+1}/{config.sae_pretrain_epochs} | "
-                f"Recon: {mean_recon:.4f} | "
-                f"Sparsity: {mean_sparse:.4f} | "
+                f"Recon: {np.mean(epoch_recon):.4f} | "
+                f"Sparsity: {np.mean(epoch_sparsity):.4f} | "
                 f"Density: {density:.3f} | "
                 f"ActiveMean: {z_active_mean:.1f}"
             )
 
-    # Final recon quality
     model.sae.eval()
-    total_recon = 0
-    n_batches = 0
+    total_recon, n_batches = 0, 0
     with torch.no_grad():
         for batch_x, _ in train_loader:
             batch_x = batch_x.to(device)
@@ -442,22 +445,11 @@ def pretrain_sae(
 # Stage 2: Logic Training
 # ============================================================================
 
-def train_logic(
-    model: SAELogicAgentV3,
-    train_loader: DataLoader,
-    val_loader: DataLoader,
-    config: SAELogicConfig,
-    device: str,
-):
-    """
-    Train bottleneck + logic layer on frozen SAE features.
-    SAE is already frozen and z_normalization is already computed.
-    """
+def train_logic(model, train_loader, val_loader, config, device, action_names):
     print("\n" + "=" * 70)
     print("STAGE 2: LOGIC TRAINING (SAE frozen, fixed normalization)")
     print("=" * 70)
 
-    # Debug: show what the logic layer will see
     with torch.no_grad():
         batch_x, batch_a = next(iter(train_loader))
         batch_x = batch_x.to(device)
@@ -472,7 +464,6 @@ def train_logic(
               f"near-binary={((z_binary < 0.05) | (z_binary > 0.95)).float().mean():.3f}")
         print(f"    Feature density: {(z_sparse > 0).float().mean():.3f}\n")
 
-    # Only train bottleneck + logic
     optimizer = torch.optim.Adam([
         {'params': model.bottleneck.parameters(), 'lr': config.bottleneck_lr},
         {'params': model.logic_layer.parameters(), 'lr': config.logic_lr},
@@ -484,7 +475,7 @@ def train_logic(
     )
 
     class_weights = torch.tensor(
-        config.action_class_weights, dtype=torch.float32, device=device
+        list(config.action_class_weights), dtype=torch.float32, device=device
     )
 
     best_val_acc = 0.0
@@ -494,7 +485,7 @@ def train_logic(
     max_patience = 100
 
     for epoch_idx in range(n_logic_epochs):
-        epoch = epoch_idx + config.sae_pretrain_epochs  # global epoch number
+        epoch = epoch_idx + config.sae_pretrain_epochs
 
         model.bottleneck.train()
         model.logic_layer.train()
@@ -502,14 +493,10 @@ def train_logic(
 
         for batch_x, batch_a in train_loader:
             batch_x, batch_a = batch_x.to(device), batch_a.to(device)
-
-            # Forward through frozen SAE + fixed norm + trainable bottleneck + logic
             action_logits, features = model.forward(batch_x, return_features=True)
 
-            # Action loss
             action_loss = F.cross_entropy(action_logits, batch_a, weight=class_weights)
 
-            # Bimodality loss (annealed from start of Stage 2)
             z_bin = features['z_binary']
             bimodal_raw = (z_bin * (1.0 - z_bin)).mean()
             if epoch_idx < config.bimodal_warmup:
@@ -519,7 +506,6 @@ def train_logic(
                 bimodal_weight = config.bimodal_max * progress
             bimodal_loss = bimodal_weight * bimodal_raw
 
-            # Logic complexity
             logic_complexity = model.logic_layer.complexity_penalty()
 
             total_loss = (
@@ -588,7 +574,7 @@ def train_logic(
             patience += 1
 
         if patience >= max_patience and epoch_idx > 100:
-            print(f"\n  [Info] Early stopping at epoch {epoch} (no improvement for {max_patience} epochs)")
+            print(f"\n  [Info] Early stopping at epoch {epoch}")
             break
 
     return best_model_state, best_val_acc, history
@@ -622,16 +608,16 @@ def per_class_accuracy(model, loader, device, action_names):
     all_preds = torch.cat(all_preds)
     all_labels = torch.cat(all_labels)
 
-    print(f"\n  {'Action':<12} {'Count':>6} {'Correct':>8} {'Accuracy':>9}")
-    print(f"  {'-'*38}")
+    print(f"\n  {'Action':<14} {'Count':>6} {'Correct':>8} {'Accuracy':>9}")
+    print(f"  {'-'*40}")
     for i, name in enumerate(action_names):
         mask = all_labels == i
         count = mask.sum().item()
         if count > 0:
             correct = (all_preds[mask] == i).sum().item()
-            print(f"  {name:<12} {count:>6} {correct:>8} {correct/count:>9.3f}")
+            print(f"  {name:<14} {count:>6} {correct:>8} {correct/count:>9.3f}")
         else:
-            print(f"  {name:<12} {0:>6} {'N/A':>8} {'N/A':>9}")
+            print(f"  {name:<14} {0:>6} {'N/A':>8} {'N/A':>9}")
 
 
 def linear_probe(model, train_loader, val_loader, device, n_epochs=50, lr=1e-3):
@@ -640,10 +626,7 @@ def linear_probe(model, train_loader, val_loader, device, n_epochs=50, lr=1e-3):
     print(f"{'='*70}")
 
     model.eval()
-    n_features = model.config.hidden_dim
-    n_actions = model.config.n_actions
 
-    # Extract features
     def collect(loader):
         zs, acts = [], []
         with torch.no_grad():
@@ -662,7 +645,7 @@ def linear_probe(model, train_loader, val_loader, device, n_epochs=50, lr=1e-3):
     print(f"  Features: {train_z.shape[1]}-d, "
           f"near-binary: {((train_z < 0.05) | (train_z > 0.95)).float().mean():.3f}")
 
-    probe = nn.Linear(n_features, n_actions).to(device)
+    probe = nn.Linear(train_z.shape[1], model.config.n_actions).to(device)
     opt = torch.optim.Adam(probe.parameters(), lr=lr)
     dl = DataLoader(TensorDataset(train_z, train_a), batch_size=256, shuffle=True)
 
@@ -761,8 +744,19 @@ def main(args):
     data = torch.load(args.features_path, weights_only=False)
     features = data['features']
     actions = data['actions']
-    print(f"  Raw features: {features.shape}, range=[{features.min():.2f}, {features.max():.2f}]")
 
+    # Resolve env metadata from file or CLI
+    env_name = data.get('env_name', args.env_name or 'unknown')
+    env_type = data.get('env_type', args.env_type or 'unknown')
+    stored_action_names = data.get('action_names', None)
+
+    n_actions = int(actions.max().item()) + 1
+    action_names = get_action_names(n_actions, stored_action_names, env_type)
+
+    print(f"  Raw features: {features.shape}, range=[{features.min():.2f}, {features.max():.2f}]")
+    print(f"  Env: {env_name} ({env_type}), actions: {n_actions} → {action_names}")
+
+    # --- Normalize ---
     stage1_data = None
     if args.stage1_path and os.path.exists(args.stage1_path):
         print(f"  Loading Stage 1 from {args.stage1_path}...")
@@ -784,50 +778,29 @@ def main(args):
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
-    # Save training data for visualization (if requested)
-    if getattr(args, 'save_training_data', False):
-        training_data_path = os.path.join(args.save_dir, "training_data.pt")
-        # Load observations if they exist in the source data
-        source_data = torch.load(args.features_path, weights_only=False)
-        obs = source_data.get('observations', source_data.get('obs', None))
-
-        save_dict = {
-            'features': features,           # NORMALIZED features (what the SAE sees)
-            'actions': actions,
-            'shuffle_indices': idx,          # permutation used for train/val split
-            'n_train': n_train,
-            'feature_mean': feat_mean,
-            'feature_std': feat_std,
-            'pre_normalized': True,          # flag: these are already normalized
-        }
-        if obs is not None:
-            if isinstance(obs, torch.Tensor):
-                save_dict['observations'] = obs
-            else:
-                save_dict['observations'] = torch.tensor(obs)
-            print(f"  Including observations: {save_dict['observations'].shape}")
-
-        torch.save(save_dict, training_data_path)
-        print(f"  Saved training data to {training_data_path}")
-        print(f"    features: {features.shape} (pre-normalized)")
-        print(f"    shuffle_indices: {idx.shape}")
-        print(f"    pre_normalized: True")
- 
-
-
-    action_names = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
-    print(f"  Train: {len(train_ds)}, Val: {len(val_ds)}, Actions: {actions.max()+1}")
+    print(f"  Train: {len(train_ds)}, Val: {len(val_ds)}")
     print(f"\n  Class distribution:")
     for i, name in enumerate(action_names):
         c = (actions == i).sum().item()
         print(f"    {name}: {c} ({100*c/len(actions):.1f}%)")
+
+    # --- Action class weights ---
+    if args.action_class_weights is not None:
+        if len(args.action_class_weights) != n_actions:
+            raise ValueError(
+                f"--action_class_weights has {len(args.action_class_weights)} values "
+                f"but env has {n_actions} actions."
+            )
+        action_class_weights = tuple(args.action_class_weights)
+    else:
+        action_class_weights = tuple([1.0] * n_actions)
 
     # --- Config ---
     config = SAELogicConfig(
         input_dim=features.shape[1],
         hidden_dim=args.hidden_dim,
         k=args.k,
-        n_actions=int(actions.max().item() + 1),
+        n_actions=n_actions,
         n_clauses_per_action=args.n_clauses_per_action,
         sae_pretrain_epochs=args.sae_pretrain_epochs,
         n_epochs=args.n_epochs,
@@ -842,9 +815,11 @@ def main(args):
         sae_lr=args.sae_lr,
         logic_lr=args.logic_lr,
         bottleneck_lr=args.bottleneck_lr,
-        action_class_weights=tuple(args.action_class_weights),
+        action_class_weights=action_class_weights,
         max_grad_norm=args.max_grad_norm,
         beta_action=args.beta_action,
+        env_name=env_name,
+        env_type=env_type,
     )
 
     # --- Model ---
@@ -864,28 +839,22 @@ def main(args):
         init_from_stage1(model.sae, stage1_data, sae_config)
 
     print(f"\nArchitecture: {config.input_dim} → SAE({config.hidden_dim}, k={config.k}) → "
-          f"FixedNorm → Sigmoid → Logic({config.n_clauses_per_action} clauses/action) → {config.n_actions}")
-    print(f"  SAE pretrain: {config.sae_pretrain_epochs} epochs")
-    print(f"  Logic train: {config.n_epochs - config.sae_pretrain_epochs} epochs")
-    print(f"  Bimodality: warmup={config.bimodal_warmup}, ramp={config.bimodal_ramp}, max={config.bimodal_max}")
+          f"FixedNorm → Sigmoid → Logic({config.n_clauses_per_action} clauses/action) → {n_actions}")
+    print(f"  SAE pretrain : {config.sae_pretrain_epochs} epochs")
+    print(f"  Logic train  : {config.n_epochs - config.sae_pretrain_epochs} epochs")
+    print(f"  Bimodality   : warmup={config.bimodal_warmup}, ramp={config.bimodal_ramp}, max={config.bimodal_max}")
 
-    # ============================
-    # STAGE 1: Pre-train SAE
-    # ============================
+    # ── Stage 1: Pre-train SAE ───────────────────────────────────────────────
     pretrain_sae(model, train_loader, config, device)
 
-    # ============================
-    # FREEZE SAE + COMPUTE NORMALIZATION
-    # ============================
+    # ── Freeze SAE + compute normalization ──────────────────────────────────
     model.freeze_sae()
     model.compute_z_normalization(train_loader)
     model.to(device)
 
-    # ============================
-    # STAGE 2: Train logic
-    # ============================
+    # ── Stage 2: Train logic ─────────────────────────────────────────────────
     best_state, best_acc, history = train_logic(
-        model, train_loader, val_loader, config, device
+        model, train_loader, val_loader, config, device, action_names
     )
 
     print(f"\n{'='*70}")
@@ -895,7 +864,7 @@ def main(args):
     if best_state is not None:
         model.load_state_dict(best_state['model'])
     else:
-        best_state = {'model': model.state_dict(), 'epoch': config.n_epochs-1, 'val_acc': best_acc}
+        best_state = {'model': model.state_dict(), 'epoch': config.n_epochs - 1, 'val_acc': best_acc}
 
     # --- Analysis ---
     print(f"\n{'='*70}")
@@ -947,6 +916,9 @@ def main(args):
         'feature_std': feat_std,
         'z_mean': model.z_mean.cpu(),
         'z_std': model.z_std.cpu(),
+        'action_names': action_names,
+        'env_name': env_name,
+        'env_type': env_type,
     }, save_path)
 
     with open(os.path.join(args.save_dir, "learned_rules.json"), 'w') as f:
@@ -958,8 +930,8 @@ def main(args):
     print(f"\n{'='*70}")
     print("RULE STATISTICS")
     print(f"{'='*70}")
-    print(f"  Total clauses: {stats['total_clauses']}")
-    print(f"  Non-empty: {stats['non_empty_clauses']}")
+    print(f"  Total clauses      : {stats['total_clauses']}")
+    print(f"  Non-empty          : {stats['non_empty_clauses']}")
     print(f"  Avg literals/clause: {stats['avg_literals_per_clause']:.2f}")
     for a, c in stats['clauses_per_action'].items():
         print(f"    {a}: {c}")
@@ -968,39 +940,72 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SAE + Product T-Norm Logic V3")
+    parser = argparse.ArgumentParser(
+        description="SAE + Product T-Norm Logic V3 (MiniGrid + Atari)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # MiniGrid
+  python train_sae_logic_v3.py \\
+      --features_path ./stage1_outputs/collected_data.pt \\
+      --stage1_path   ./stage1_outputs/stage1_outputs.pt \\
+      --hidden_dim 300 --k 50
+
+  # Atari Breakout (4 actions)
+  python train_sae_logic_v3.py \\
+      --features_path ./stage1_atari/collected_data.pt \\
+      --stage1_path   ./stage1_atari/stage1_outputs.pt \\
+      --hidden_dim 1024 --k 100
+
+  # Atari with explicit class weights
+  python train_sae_logic_v3.py \\
+      --features_path ./stage1_atari/collected_data.pt \\
+      --action_class_weights 1.0 2.0 1.0 1.0
+        """
+    )
 
     parser.add_argument("--features_path", type=str, required=True)
     parser.add_argument("--stage1_path", type=str, default=None)
 
-    parser.add_argument("--hidden_dim", type=int, default=300)
-    parser.add_argument("--k", type=int, default=50)
+    # Env metadata (auto-detected from collected_data.pt if present)
+    parser.add_argument("--env_name", type=str, default=None,
+                        help="Override env name (usually auto-detected from features file)")
+    parser.add_argument("--env_type", type=str, default=None, choices=["minigrid", "atari"],
+                        help="Override env type (usually auto-detected from features file)")
+
+    # Architecture
+    parser.add_argument("--hidden_dim", type=int, default=300,
+                        help="SAE hidden dim (MiniGrid: 300, Atari: 1024 recommended)")
+    parser.add_argument("--k", type=int, default=50,
+                        help="SAE top-k sparsity (MiniGrid: 50, Atari: 100 recommended)")
     parser.add_argument("--n_clauses_per_action", type=int, default=10)
 
+    # Training
     parser.add_argument("--sae_pretrain_epochs", type=int, default=50)
     parser.add_argument("--n_epochs", type=int, default=400)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
 
+    # LRs
     parser.add_argument("--sae_lr", type=float, default=1e-3)
     parser.add_argument("--logic_lr", type=float, default=3e-3)
     parser.add_argument("--bottleneck_lr", type=float, default=1e-3)
 
+    # Loss weights
     parser.add_argument("--beta_action", type=float, default=5.0)
     parser.add_argument("--bimodal_max", type=float, default=0.3)
     parser.add_argument("--bimodal_warmup", type=int, default=30)
     parser.add_argument("--bimodal_ramp", type=int, default=80)
-
     parser.add_argument("--l0_penalty", type=float, default=1e-4)
     parser.add_argument("--lambda_sparsity", type=float, default=5e-3)
     parser.add_argument("--max_grad_norm", type=float, default=5.0)
 
+    # Per-action class weights — variable length, auto-infers n_actions
+    parser.add_argument("--action_class_weights", type=float, nargs="+", default=None,
+                        help="Per-action loss weights. Length must match env's n_actions. "
+                             "Default: uniform 1.0 for all actions.")
+
     parser.add_argument("--save_dir", type=str, default="./sae_logic_v3_outputs")
-    parser.add_argument(
-        "--action_class_weights", type=float, nargs=7,
-        default=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-    )
-    parser.add_argument("--save_training_data", action="store_true",
-                    help="Save normalized features + observations for visualization")
+
     args = parser.parse_args()
     main(args)

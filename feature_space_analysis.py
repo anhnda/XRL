@@ -2,6 +2,7 @@
 Stage 1: Feature Space Analysis
 ================================
 Analyzes the frozen PPO feature space before SAE training.
+Supports both MiniGrid and Atari environments.
 
 Outputs:
     - SVD: signal subspace V_k, effective dimensionality k, explained variance curve
@@ -9,9 +10,22 @@ Outputs:
     - Feature normalization stats (mean, std)
     - Diagnostic plots and report
 
-Usage:
-    python feature_space_analysis.py --features_path ./collected_data/features.pt
-    python feature_space_analysis.py --model_path ppo_doorkey_5x5.zip --env_name MiniGrid-DoorKey-5x5-v0
+Usage (MiniGrid):
+    python feature_space_analysis.py \
+        --model_path ppo_doorkey_5x5.zip \
+        --env_name MiniGrid-DoorKey-5x5-v0 \
+        --env_type minigrid
+
+Usage (Atari):
+    python feature_space_analysis.py \
+        --model_path ppo_atari_breakout.zip \
+        --env_name "ALE/Breakout-v5" \
+        --env_type atari \
+        --n_episodes 200
+
+Usage (pre-collected features):
+    python feature_space_analysis.py \
+        --features_path ./collected_data/features.pt
 """
 
 import argparse
@@ -27,6 +41,58 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.decomposition import FastICA
 from scipy.stats import kurtosis as scipy_kurtosis
+
+
+# ---------------------------------------------------------------------------
+# Environment registry — add new envs here, no other changes needed
+# ---------------------------------------------------------------------------
+
+ENV_REGISTRY = {
+    # MiniGrid
+    "MiniGrid-DoorKey-5x5-v0":     {"type": "minigrid", "n_actions": 7},
+    "MiniGrid-DoorKey-8x8-v0":     {"type": "minigrid", "n_actions": 7},
+    "MiniGrid-DoorKey-16x16-v0":   {"type": "minigrid", "n_actions": 7},
+    "MiniGrid-FourRooms-v0":       {"type": "minigrid", "n_actions": 7},
+    "MiniGrid-Empty-5x5-v0":       {"type": "minigrid", "n_actions": 7},
+    # Atari
+    "ALE/Breakout-v5":             {"type": "atari",    "n_actions": 4,
+                                    "action_names": ["NOOP","FIRE","RIGHT","LEFT"]},
+    "ALE/Pong-v5":                 {"type": "atari",    "n_actions": 6,
+                                    "action_names": ["NOOP","FIRE","RIGHT","LEFT","RIGHTFIRE","LEFTFIRE"]},
+    "ALE/SpaceInvaders-v5":        {"type": "atari",    "n_actions": 6,
+                                    "action_names": ["NOOP","FIRE","RIGHT","LEFT","RIGHTFIRE","LEFTFIRE"]},
+    "ALE/Enduro-v5":               {"type": "atari",    "n_actions": 9,
+                                    "action_names": ["NOOP","FIRE","RIGHT","LEFT","DOWN",
+                                                     "DOWNRIGHT","DOWNLEFT","RIGHTFIRE","LEFTFIRE"]},
+    "ALE/Qbert-v5":                {"type": "atari",    "n_actions": 6,
+                                    "action_names": ["NOOP","FIRE","RIGHT","LEFT","RIGHTFIRE","LEFTFIRE"]},
+    "ALE/MontezumaRevenge-v5":     {"type": "atari",    "n_actions": 18, "action_names": None},
+}
+
+MINIGRID_ACTION_NAMES = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
+
+
+def resolve_env_info(env_name: str, env_type: str = None):
+    """Return (env_type, n_actions, action_names) for a given env."""
+    info = ENV_REGISTRY.get(env_name)
+    if info:
+        etype = info["type"]
+        n_actions = info["n_actions"]
+        action_names = info.get("action_names", None)
+        if etype == "minigrid":
+            action_names = MINIGRID_ACTION_NAMES
+        return etype, n_actions, action_names
+
+    # Not in registry — fall back to the explicit --env_type flag
+    if env_type == "minigrid":
+        return "minigrid", 7, MINIGRID_ACTION_NAMES
+    elif env_type == "atari":
+        # n_actions will be inferred from collected data
+        return "atari", None, None
+    else:
+        raise ValueError(
+            f"Unknown env '{env_name}'. Either add it to ENV_REGISTRY or pass --env_type."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +268,17 @@ def compute_normalization_stats(X: np.ndarray):
 # Action distribution analysis
 # ---------------------------------------------------------------------------
 
-def action_distribution_analysis(actions: np.ndarray, n_actions: int = 7):
-    action_names = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
+def action_distribution_analysis(actions: np.ndarray, action_names=None):
+    n_actions = int(actions.max()) + 1
+
+    if action_names is None:
+        action_names = [f"action_{i}" for i in range(n_actions)]
+    else:
+        # Pad/trim to match actual number of actions seen
+        if len(action_names) < n_actions:
+            action_names = action_names + [f"action_{i}" for i in range(len(action_names), n_actions)]
+        action_names = action_names[:n_actions]
+
     counts = np.bincount(actions, minlength=n_actions)
     freqs = counts / counts.sum()
 
@@ -213,7 +288,7 @@ def action_distribution_analysis(actions: np.ndarray, n_actions: int = 7):
     print(f"  Total samples: {len(actions)}")
     for a in range(n_actions):
         bar = "█" * int(freqs[a] * 50)
-        print(f"  {action_names[a]:10s}: {counts[a]:6d} ({freqs[a]*100:5.1f}%) {bar}")
+        print(f"  {action_names[a]:12s}: {counts[a]:6d} ({freqs[a]*100:5.1f}%) {bar}")
 
     freqs_nonzero = freqs[freqs > 0]
     entropy = -np.sum(freqs_nonzero * np.log2(freqs_nonzero))
@@ -221,7 +296,7 @@ def action_distribution_analysis(actions: np.ndarray, n_actions: int = 7):
     print(f"\n  Entropy: {entropy:.3f} / {max_entropy:.3f} (max)")
     print(f"  Normalized entropy: {entropy/max_entropy:.3f}")
 
-    return {"counts": counts, "freqs": freqs, "entropy": entropy}
+    return {"counts": counts, "freqs": freqs, "entropy": entropy, "action_names": action_names}
 
 
 # ---------------------------------------------------------------------------
@@ -288,11 +363,12 @@ def plot_diagnostics(svd_result, ica_result, norm_stats, action_stats, save_dir)
     print(f"\n  Diagnostic plot saved: {plot_path}")
 
     fig2, ax2 = plt.subplots(figsize=(8, 4))
-    action_names = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
+    action_names = action_stats["action_names"]
     freqs = action_stats["freqs"]
     bars = ax2.bar(action_names, freqs * 100, color="steelblue", alpha=0.8, edgecolor="black")
     ax2.set_ylabel("Frequency (%)"); ax2.set_title("Action Distribution in Rollout Data")
     ax2.grid(True, alpha=0.3, axis="y")
+    plt.xticks(rotation=30, ha="right")
     for bar, f in zip(bars, freqs):
         ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
                  f"{f*100:.1f}%", ha="center", va="bottom", fontsize=9)
@@ -307,7 +383,7 @@ def plot_diagnostics(svd_result, ica_result, norm_stats, action_stats, save_dir)
 # Save / Load
 # ---------------------------------------------------------------------------
 
-def save_stage1_outputs(svd_result, ica_result, norm_stats, action_stats, save_dir):
+def save_stage1_outputs(svd_result, ica_result, norm_stats, action_stats, save_dir, meta=None):
     os.makedirs(save_dir, exist_ok=True)
 
     stage1_data = {
@@ -329,13 +405,18 @@ def save_stage1_outputs(svd_result, ica_result, norm_stats, action_stats, save_d
         "action_counts": torch.from_numpy(action_stats["counts"]).long(),
         "action_freqs": torch.from_numpy(action_stats["freqs"]).float(),
         "action_entropy": action_stats["entropy"],
+        "action_names": action_stats["action_names"],
     }
+    if meta:
+        stage1_data["meta"] = meta
 
     save_path = os.path.join(save_dir, "stage1_outputs.pt")
     torch.save(stage1_data, save_path)
     print(f"\n  Stage 1 outputs saved: {save_path}")
 
     summary = {
+        "env_name": meta.get("env_name", "unknown") if meta else "unknown",
+        "env_type": meta.get("env_type", "unknown") if meta else "unknown",
         "feature_dim": int(svd_result["V"].shape[0]),
         "signal_dim_k_95pct": int(svd_result["k"]),
         "signal_dim_k_elbow": int(svd_result["k_elbow"]),
@@ -347,6 +428,7 @@ def save_stage1_outputs(svd_result, ica_result, norm_stats, action_stats, save_d
         "feature_mean_range": [float(norm_stats["mean"].min()), float(norm_stats["mean"].max())],
         "feature_std_range": [float(norm_stats["std"].min()), float(norm_stats["std"].max())],
         "action_entropy": float(action_stats["entropy"]),
+        "action_names": action_stats["action_names"],
     }
 
     summary_path = os.path.join(save_dir, "stage1_summary.json")
@@ -366,11 +448,11 @@ def load_stage1_outputs(path):
 
 
 # ---------------------------------------------------------------------------
-# Data collection — NOW WITH OBSERVATIONS
+# Data collection — MiniGrid
 # ---------------------------------------------------------------------------
 
-def collect_features(model_path, env_name, n_episodes=800, seed=42, tile_size=8):
-    """Collect features, actions, grid obs, AND pixel-rendered observations."""
+def collect_features_minigrid(model_path, env_name, n_episodes=800, seed=42, tile_size=8):
+    """Collect features from a MiniGrid environment."""
     import gymnasium as gym
     import minigrid  # noqa: F401
     from minigrid.wrappers import ImgObsWrapper
@@ -378,7 +460,7 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42, tile_size=8)
     from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
     from tqdm import tqdm
 
-    print(f"Loading PPO model from {model_path}...")
+    print(f"[MiniGrid] Loading PPO model from {model_path}...")
     model = PPO.load(model_path)
 
     raw_env_ref = [None]
@@ -394,12 +476,10 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42, tile_size=8)
     env = DummyVecEnv([make_env()])
     env = VecTransposeImage(env)
 
-    features_list = []
-    actions_list = []
-    obs_grid_list = []
-    obs_pixel_list = []
+    features_list, actions_list = [], []
+    obs_grid_list, obs_pixel_list = [], []
 
-    print(f"Collecting {n_episodes} episodes...")
+    print(f"[MiniGrid] Collecting {n_episodes} episodes...")
     obs = env.reset()
     episode_count = 0
 
@@ -408,25 +488,20 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42, tile_size=8)
         while episode_count < n_episodes:
             raw_env = raw_env_ref[0].unwrapped
             try:
-                # Grid encoding (for dedup / hashing)
                 grid_obs = raw_env.gen_obs()['image']
                 obs_grid_list.append(grid_obs.copy())
-
-                # Pixel render via MiniGrid's own renderer
-                # This handles orientation, agent marker, colors correctly
                 pixel_obs = raw_env.get_obs_render(grid_obs, tile_size=tile_size)
                 obs_pixel_list.append(pixel_obs)
             except Exception:
                 obs_grid_list.append(np.zeros((7, 7, 3), dtype=np.uint8))
-                obs_pixel_list.append(
-                    np.zeros((7 * tile_size, 7 * tile_size, 3), dtype=np.uint8))
+                obs_pixel_list.append(np.zeros((7 * tile_size, 7 * tile_size, 3), dtype=np.uint8))
 
             action, _ = model.predict(obs, deterministic=False)
             obs_tensor = torch.as_tensor(obs).float().to(model.device)
             features = model.policy.features_extractor(obs_tensor)
             features_list.append(features.cpu())
             actions_list.append(torch.tensor(action))
-            obs, rewards, dones, infos = env.step(action)
+            obs, _, dones, _ = env.step(action)
             if dones[0]:
                 episode_count += 1
                 pbar.update(1)
@@ -440,11 +515,75 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42, tile_size=8)
     observations = torch.tensor(np.stack(obs_grid_list))
     observations_pixel = torch.tensor(np.stack(obs_pixel_list))
 
-    print(f"Collected {len(features)} samples, feature dim = {features.shape[1]}")
+    print(f"[MiniGrid] Collected {len(features)} samples, feature dim = {features.shape[1]}")
     print(f"  Grid observations: {observations.shape}")
     print(f"  Pixel observations: {observations_pixel.shape}")
 
-    return features, actions, observations, observations_pixel
+    return features, actions, {"observations": observations, "observations_pixel": observations_pixel}
+
+
+# ---------------------------------------------------------------------------
+# Data collection — Atari
+# ---------------------------------------------------------------------------
+
+def collect_features_atari(model_path, env_name, n_episodes=200, seed=42):
+    """Collect features from an Atari (ALE) environment."""
+    import ale_py
+    import gymnasium as gym
+    gym.register_envs(ale_py)
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.env_util import make_atari_env
+    from stable_baselines3.common.vec_env import VecFrameStack, VecTransposeImage
+    from tqdm import tqdm
+
+    print(f"[Atari] Loading PPO model from {model_path}...")
+    model = PPO.load(model_path)
+
+    env = make_atari_env(env_name, n_envs=1, seed=seed)
+    env = VecFrameStack(env, n_stack=4)
+    env = VecTransposeImage(env)
+
+    features_list, actions_list = [], []
+
+    print(f"[Atari] Collecting {n_episodes} episodes...")
+    obs = env.reset()
+    episode_count = 0
+
+    with torch.no_grad():
+        pbar = tqdm(total=n_episodes)
+        while episode_count < n_episodes:
+            action, _ = model.predict(obs, deterministic=False)
+            obs_tensor = torch.as_tensor(obs).float().to(model.device)
+            features = model.policy.features_extractor(obs_tensor)
+            features_list.append(features.cpu())
+            actions_list.append(torch.tensor(action))
+            obs, _, dones, _ = env.step(action)
+            if dones[0]:
+                episode_count += 1
+                pbar.update(1)
+                obs = env.reset()
+        pbar.close()
+
+    env.close()
+
+    features = torch.cat(features_list, dim=0)
+    actions = torch.cat(actions_list, dim=0)
+
+    print(f"[Atari] Collected {len(features)} samples, feature dim = {features.shape[1]}")
+    return features, actions, {}   # no grid/pixel obs for Atari
+
+
+# ---------------------------------------------------------------------------
+# Unified collect_features dispatcher
+# ---------------------------------------------------------------------------
+
+def collect_features(model_path, env_name, env_type, n_episodes=800, seed=42, tile_size=8):
+    if env_type == "minigrid":
+        return collect_features_minigrid(model_path, env_name, n_episodes, seed, tile_size)
+    elif env_type == "atari":
+        return collect_features_atari(model_path, env_name, n_episodes, seed)
+    else:
+        raise ValueError(f"Unknown env_type: {env_type}. Must be 'minigrid' or 'atari'.")
 
 
 # ---------------------------------------------------------------------------
@@ -452,10 +591,12 @@ def collect_features(model_path, env_name, n_episodes=800, seed=42, tile_size=8)
 # ---------------------------------------------------------------------------
 
 def run_stage1(features: torch.Tensor, actions: torch.Tensor,
+               action_names=None,
                variance_threshold: float = 0.95,
                ica_n_runs: int = 5,
                seed: int = 42,
-               save_dir: str = "./stage1_outputs"):
+               save_dir: str = "./stage1_outputs",
+               meta: dict = None):
     X = features.numpy()
     A = actions.numpy().astype(int)
 
@@ -470,9 +611,9 @@ def run_stage1(features: torch.Tensor, actions: torch.Tensor,
         n_runs=ica_n_runs, seed=seed
     )
     norm_stats = compute_normalization_stats(X)
-    action_stats = action_distribution_analysis(A)
+    action_stats = action_distribution_analysis(A, action_names=action_names)
     plot_diagnostics(svd_result, ica_result, norm_stats, action_stats, save_dir)
-    save_path = save_stage1_outputs(svd_result, ica_result, norm_stats, action_stats, save_dir)
+    save_path = save_stage1_outputs(svd_result, ica_result, norm_stats, action_stats, save_dir, meta=meta)
 
     k = svd_result["k"]
     d = X.shape[1]
@@ -497,51 +638,106 @@ def run_stage1(features: torch.Tensor, actions: torch.Tensor,
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage 1: Feature Space Analysis")
+    parser = argparse.ArgumentParser(
+        description="Stage 1: Feature Space Analysis (MiniGrid + Atari)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # MiniGrid
+  python feature_space_analysis.py \\
+      --model_path ppo_doorkey_5x5.zip \\
+      --env_name MiniGrid-DoorKey-5x5-v0
+
+  # Atari
+  python feature_space_analysis.py \\
+      --model_path ppo_atari_breakout.zip \\
+      --env_name "ALE/Breakout-v5" \\
+      --env_type atari \\
+      --n_episodes 200
+
+  # Pre-collected features (env-agnostic)
+  python feature_space_analysis.py \\
+      --features_path ./collected_data/features.pt
+        """
+    )
     parser.add_argument("--features_path", type=str, default=None,
-                        help="Path to pre-collected features .pt file (with 'features' and 'actions' keys)")
+                        help="Path to pre-collected .pt file (with 'features' and 'actions' keys). "
+                             "Skips collection entirely.")
     parser.add_argument("--model_path", type=str, default="ppo_doorkey_5x5.zip",
                         help="PPO model path (used if --features_path not given)")
     parser.add_argument("--env_name", type=str, default="MiniGrid-DoorKey-5x5-v0",
-                        help="Environment name (used if --features_path not given)")
+                        help="Gymnasium environment ID")
+    parser.add_argument("--env_type", type=str, default=None, choices=["minigrid", "atari"],
+                        help="Override env type. Auto-detected from ENV_REGISTRY if not given.")
     parser.add_argument("--n_episodes", type=int, default=800,
-                        help="Number of episodes to collect")
-    parser.add_argument("--variance_threshold", type=float, default=0.95,
-                        help="Cumulative variance threshold for signal dim k")
-    parser.add_argument("--ica_n_runs", type=int, default=5,
-                        help="Number of ICA runs for stability check")
+                        help="Number of episodes to collect (Atari: recommend 200, MiniGrid: 800)")
+    parser.add_argument("--variance_threshold", type=float, default=0.95)
+    parser.add_argument("--ica_n_runs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="./stage1_outputs")
+    parser.add_argument("--tile_size", type=int, default=8,
+                        help="MiniGrid only: tile size for pixel rendering")
 
     args = parser.parse_args()
 
+    extra_obs = {}
+
     if args.features_path is not None:
+        # ── Pre-collected path ──────────────────────────────────────────────
         print(f"Loading features from {args.features_path}...")
         data = torch.load(args.features_path, map_location="cpu", weights_only=False)
         features = data["features"]
         actions = data["actions"]
+        action_names = data.get("action_names", None)
+        env_type = data.get("env_type", args.env_type or "unknown")
+        env_name = data.get("env_name", args.env_name)
     else:
-        features, actions, observations, observations_pixel = collect_features(
-            args.model_path, args.env_name, args.n_episodes, args.seed
+        # ── Live collection path ────────────────────────────────────────────
+        env_type, n_actions, action_names = resolve_env_info(args.env_name, args.env_type)
+        env_name = args.env_name
+
+        print(f"\nEnvironment : {env_name}")
+        print(f"Type        : {env_type}")
+        print(f"Actions     : {n_actions} {action_names}")
+
+        features, actions, extra_obs = collect_features(
+            args.model_path, env_name, env_type,
+            n_episodes=args.n_episodes, seed=args.seed, tile_size=args.tile_size
         )
+
+        # Infer n_actions from data if not known (e.g. unlisted Atari game)
+        if action_names is None:
+            n_actions_actual = int(actions.max().item()) + 1
+            action_names = [f"action_{i}" for i in range(n_actions_actual)]
+
+        # Save raw collected data
         os.makedirs(args.save_dir, exist_ok=True)
         raw_path = os.path.join(args.save_dir, "collected_data.pt")
-        torch.save({
+        save_dict = {
             "features": features,
             "actions": actions,
-            "observations": observations,            # grid encoding (for dedup)
-            "observations_pixel": observations_pixel, # MiniGrid rendered (for display)
-        }, raw_path)
-        print(f"Raw data saved: {raw_path}")
-        print(f"  Grid obs: {observations.shape}")
-        print(f"  Pixel obs: {observations_pixel.shape}")
+            "env_name": env_name,
+            "env_type": env_type,
+            "action_names": action_names,
+        }
+        save_dict.update(extra_obs)
+        torch.save(save_dict, raw_path)
+        print(f"\nRaw data saved: {raw_path}")
+        for k, v in extra_obs.items():
+            if isinstance(v, torch.Tensor):
+                print(f"  {k}: {v.shape}")
+
+    meta = {"env_name": env_name if 'env_name' in dir() else args.env_name,
+            "env_type": env_type if 'env_type' in dir() else (args.env_type or "unknown")}
 
     stage1_data = run_stage1(
         features, actions,
+        action_names=action_names if 'action_names' in dir() else None,
         variance_threshold=args.variance_threshold,
         ica_n_runs=args.ica_n_runs,
         seed=args.seed,
         save_dir=args.save_dir,
+        meta=meta,
     )
 
 
