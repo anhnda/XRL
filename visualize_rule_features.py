@@ -148,12 +148,12 @@ def render_image_obs(obs: np.ndarray) -> np.ndarray:
 def smart_render(obs: np.ndarray, cell_size: int = 16) -> np.ndarray:
     """
     Render observation to RGB image.
-    Uses MiniGrid's own tile renderer if available (correct colors + orientation).
-    Falls back to custom renderer otherwise.
+    Uses MiniGrid's own tile renderer if available (correct colors).
+    Does NOT draw an agent marker (we don't know the true position from obs alone).
     """
     # If it's already a large RGB image (pixel obs), just return it
     if obs.ndim == 3 and obs.shape[0] > 20 and obs.shape[1] > 20 and obs.shape[2] == 3:
-        if obs.max() > 15:  # actual pixel values, not grid encoding
+        if obs.max() > 15:
             return render_image_obs(obs)
     
     # Check if it's a MiniGrid grid encoding (small integers in channel 0)
@@ -165,12 +165,13 @@ def smart_render(obs: np.ndarray, cell_size: int = 16) -> np.ndarray:
                 is_grid = True
     
     if is_grid:
-        # Try MiniGrid's own renderer
+        # Try MiniGrid's own tile renderer — NO agent marker
         try:
             from minigrid.core.grid import Grid
             grid, vis_mask = Grid.decode(obs)
-            img = grid.render(cell_size, agent_pos=(obs.shape[0] - 1, obs.shape[1] // 2),
-                              agent_dir=3, highlight_mask=vis_mask)
+            # Render without agent (agent_pos=None avoids drawing the red triangle)
+            img = grid.render(cell_size, agent_pos=None, agent_dir=None,
+                              highlight_mask=vis_mask)
             return img
         except Exception:
             pass
