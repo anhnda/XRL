@@ -1,6 +1,8 @@
 # train_atari_breakout.py
-
+import ale_py
 import gymnasium as gym
+gym.register_envs(ale_py)
+
 import torch
 import torch.nn as nn
 
@@ -10,7 +12,7 @@ from stable_baselines3.common.env_util import make_atari_env
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.vec_env import VecFrameStack, VecTransposeImage
 
-
+gym.register_envs(ale_py)
 # ------------------------------------------------------------
 # Nature DQN-style CNN — the standard for Atari
 # Input: (N, 4, 84, 84) stacked grayscale frames
@@ -47,7 +49,7 @@ class AtariCNN(BaseFeaturesExtractor):
 def main():
     seed = 42
     n_envs = 8
-    game = "BreakoutNoFrameskip-v4"  # ← swap game name here
+    game = "ALE/Breakout-v5"  # ← swap game name here
 
     # make_atari_env handles: NoopReset, MaxAndSkip, EpisodicLife,
     # FireReset, WarpFrame (84×84 grayscale), ClipReward
