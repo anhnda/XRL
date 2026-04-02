@@ -87,16 +87,17 @@ def render_minigrid_obs(obs: np.ndarray, cell_size: int = 16) -> np.ndarray:
 
     Channel 0 = object type, Channel 1 = color, Channel 2 = state.
     Returns an (H*cell_size, W*cell_size, 3) uint8 image.
+    
+    The agent is at the bottom-center (row H-1, col W//2) facing upward.
+    We draw a red triangle to mark the agent position and direction.
     """
     if obs.ndim == 1:
-        # Flattened — try to reshape. Common sizes: 7x7x3=147, 5x5x3=75
         n = obs.shape[0]
         for side in [7, 5, 6, 8, 11, 13]:
             if n == side * side * 3:
                 obs = obs.reshape(side, side, 3)
                 break
         else:
-            # Can't reshape — return a placeholder
             img = np.full((cell_size * 4, cell_size * 4, 3), 128, dtype=np.uint8)
             return img
 
@@ -129,6 +130,26 @@ def render_minigrid_obs(obs: np.ndarray, cell_size: int = 16) -> np.ndarray:
             # Grid lines
             img[y0, x0:x1] = np.minimum(base.astype(np.int32) - 30, 0).clip(0).astype(np.uint8)
             img[y0:y1, x0] = np.minimum(base.astype(np.int32) - 30, 0).clip(0).astype(np.uint8)
+
+    # ── Draw agent marker at bottom-center, facing up ──
+    agent_r, agent_c = H - 1, W // 2
+    cy = agent_r * cell_size + cell_size // 2
+    cx = agent_c * cell_size + cell_size // 2
+    s = max(cell_size // 3, 2)  # triangle half-size
+
+    # Draw upward-pointing triangle (red) 
+    agent_color = np.array([255, 50, 50], dtype=np.uint8)
+    for dy in range(-s, s + 1):
+        # Width of triangle at this row
+        row_y = cy + dy
+        if row_y < 0 or row_y >= img.shape[0]:
+            continue
+        # Triangle narrows toward top (dy = -s), widest at bottom (dy = +s)
+        half_w = max(0, int(s * (dy + s) / (2 * s)))
+        for dx in range(-half_w, half_w + 1):
+            col_x = cx + dx
+            if 0 <= col_x < img.shape[1]:
+                img[row_y, col_x] = agent_color
 
     return img
 
