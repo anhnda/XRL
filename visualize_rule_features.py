@@ -181,7 +181,7 @@ def load_model(model_path: str, device: str = "cpu"):
     
     # Try importing from training script
     try:
-        from train_sae_logic import SAELogicAgentV3, SAELogicConfig
+        from train_sae_logic_v3 import SAELogicAgentV3, SAELogicConfig
         config = SAELogicConfig(**{k: v for k, v in config_dict.items() 
                                    if k in SAELogicConfig.__dataclass_fields__})
         model = SAELogicAgentV3(config, device=device)
@@ -207,7 +207,7 @@ def load_model(model_path: str, device: str = "cpu"):
               "sparse_concept_autoencoder.py is in the Python path.")
         sys.exit(1)
     
-    from train_sae_logic import SAELogicAgentV3, SAELogicConfig
+    from train_sae_logic_v3 import SAELogicAgentV3, SAELogicConfig
     config = SAELogicConfig(**{k: v for k, v in config_dict.items() 
                                if k in SAELogicConfig.__dataclass_fields__})
     model = SAELogicAgentV3(config, device=device)
@@ -330,14 +330,15 @@ def parse_rules_for_features(rules: dict) -> dict:
 def collect_feature_activations(model, features_tensor, device, batch_size=512,
                                 pre_normalized=False):
     """
-    Run frozen SAE over all data, return sparse activations (N, hidden_dim).
+    Run frozen SAE + bottleneck over all data.
     
-    Args:
-        pre_normalized: If True, features are already normalized (as during training).
-                       If False, apply model.normalize_input() first.
+    Returns:
+        all_z_sparse: (N, hidden_dim) raw SAE activations
+        all_z_binary: (N, hidden_dim) post-bottleneck binary features (what logic sees)
     """
     model.eval()
-    all_z = []
+    all_z_sparse = []
+    all_z_binary = []
     n = features_tensor.shape[0]
     
     for i in range(0, n, batch_size):
@@ -345,9 +346,12 @@ def collect_feature_activations(model, features_tensor, device, batch_size=512,
         if not pre_normalized:
             batch = model.normalize_input(batch)
         z_sparse, _ = model.sae.encode(batch)
-        all_z.append(z_sparse.cpu())
+        z_normed = model.normalize_z(z_sparse)
+        z_binary = model.bottleneck(z_normed)
+        all_z_sparse.append(z_sparse.cpu())
+        all_z_binary.append(z_binary.cpu())
     
-    return torch.cat(all_z, dim=0)
+    return torch.cat(all_z_sparse, dim=0), torch.cat(all_z_binary, dim=0)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -647,18 +651,20 @@ def main():
     print(f"  Actions: {actions_tensor.shape}")
     
     # ── Collect SAE activations ──
-    print(f"\nRunning frozen SAE over {len(features_tensor)} samples...")
-    all_z = collect_feature_activations(model, features_tensor, device,
-                                         pre_normalized=pre_normalized)
-    print(f"  Activations shape: {all_z.shape}")
+    print(f"\nRunning frozen SAE + bottleneck over {len(features_tensor)} samples...")
+    all_z_sparse, all_z_binary = collect_feature_activations(
+        model, features_tensor, device, pre_normalized=pre_normalized)
+    print(f"  z_sparse shape: {all_z_sparse.shape}")
+    print(f"  z_binary shape: {all_z_binary.shape}")
     
-    # Sanity check: activations should have variation
+    # Sanity check: z_binary should be near 0 or 1 with meaningful variation
     for fidx in sorted(parse_rules_for_features(rules).keys())[:3]:
-        z_col = all_z[:, fidx]
-        n_unique = len(torch.unique(z_col))
-        print(f"  Feature f_{fidx}: unique_values={n_unique}, "
-              f"range=[{z_col.min():.3f}, {z_col.max():.3f}], "
-              f"nonzero={( z_col > 0).sum().item()}/{len(z_col)}")
+        zb = all_z_binary[:, fidx]
+        n_on = (zb > 0.5).sum().item()
+        n_off = (zb < 0.5).sum().item()
+        print(f"  Feature f_{fidx}: ON={n_on}, OFF={n_off}, "
+              f"binary_mean={zb.mean():.3f}, "
+              f"near_binary={((zb < 0.05) | (zb > 0.95)).float().mean():.3f}")
     
     
     # ── Per-feature visualization ──
@@ -673,25 +679,25 @@ def main():
         print(f"\n  Feature f_{fidx}:")
         info = feature_info[fidx]
         
-        # Get activation values for this feature
-        z_col = all_z[:, fidx].numpy()
+        # Use BINARY (post-bottleneck) values for sorting — this is what the logic layer sees
+        z_bin_col = all_z_binary[:, fidx].numpy()
+        # Also keep sparse values for reference
+        z_sparse_col = all_z_sparse[:, fidx].numpy()
         
-        # Top-K activating (highest activation)
-        top_indices = np.argsort(z_col)[::-1][:args.top_k]
-        # Bottom-K: near zero activation (sorted by ascending, only truly low)
-        # Filter to samples where activation is actually near zero
-        near_zero_mask = z_col < 0.01
-        if near_zero_mask.sum() >= args.top_k:
-            # Among near-zero, pick randomly for diversity
-            zero_indices = np.where(near_zero_mask)[0]
+        # Top-K: highest bottleneck activation (feature = ON)
+        top_indices = np.argsort(z_bin_col)[::-1][:args.top_k]
+        # Bottom-K: lowest bottleneck activation (feature = OFF)
+        # Pick from samples where feature is clearly OFF (< 0.1)
+        off_mask = z_bin_col < 0.1
+        if off_mask.sum() >= args.top_k:
+            off_indices = np.where(off_mask)[0]
             rng = np.random.RandomState(42 + fidx)
-            bottom_indices = rng.choice(zero_indices, size=args.top_k, replace=False)
+            bottom_indices = rng.choice(off_indices, size=args.top_k, replace=False)
         else:
-            # Just take the lowest
-            bottom_indices = np.argsort(z_col)[:args.top_k]
+            bottom_indices = np.argsort(z_bin_col)[:args.top_k]
         
-        top_act_values = z_col[top_indices]
-        bottom_act_values = z_col[bottom_indices]
+        top_act_values = z_bin_col[top_indices]
+        bottom_act_values = z_bin_col[bottom_indices]
         
         top_action_labels = [action_names[actions_tensor[i].item()] for i in top_indices]
         bottom_action_labels = [action_names[actions_tensor[i].item()] for i in bottom_indices]
@@ -819,19 +825,19 @@ def main():
     
     # ── Print feature activation statistics ──
     print(f"\n{'='*70}")
-    print("FEATURE ACTIVATION STATISTICS")
+    print("FEATURE ACTIVATION STATISTICS (post-bottleneck)")
     print(f"{'='*70}")
-    print(f"\n  {'Feature':<10} {'Density':>8} {'Mean(active)':>13} {'Max':>8} {'Actions'}")
-    print(f"  {'-'*65}")
+    print(f"\n  {'Feature':<10} {'ON%':>6} {'OFF%':>6} {'BinMean':>8} {'NearBin%':>9} {'Actions'}")
+    print(f"  {'-'*70}")
     for fidx in rule_features:
-        z_col = all_z[:, fidx]
-        density = (z_col > 0).float().mean().item()
-        active = z_col[z_col > 0]
-        mean_active = active.mean().item() if len(active) > 0 else 0
-        max_val = z_col.max().item()
+        zb = all_z_binary[:, fidx]
+        on_pct = (zb > 0.5).float().mean().item() * 100
+        off_pct = (zb < 0.5).float().mean().item() * 100
+        bin_mean = zb.mean().item()
+        near_bin = ((zb < 0.05) | (zb > 0.95)).float().mean().item() * 100
         acts = ', '.join(f"{'¬' if v == 'neg' else ''}{k}" 
                         for k, v in feature_info[fidx]['polarities'].items())
-        print(f"  f_{fidx:<6} {density:>8.3f} {mean_active:>13.3f} {max_val:>8.3f}   {acts}")
+        print(f"  f_{fidx:<6} {on_pct:>5.1f}% {off_pct:>5.1f}% {bin_mean:>8.3f} {near_bin:>8.1f}%   {acts}")
     
     print(f"\nDone! All outputs in {args.save_dir}/")
 

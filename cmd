@@ -8,9 +8,9 @@ python train_sae_logic.py \
     --stage1_path ./stage1_outputs/stage1_outputs.pt \
     --hidden_dim 300 --k 50 \
     --n_clauses_per_action 10 \
-    --sae_pretrain_epochs 50 \
+    --sae_pretrain_epochs 100 \
     --n_epochs 300 \
-    --max_grad_norm 5.0
+    --max_grad_norm 5.0 --save_training_data
 python check_success_rules.py \
     --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
     --ppo_path ppo_doorkey_5x5.zip \
