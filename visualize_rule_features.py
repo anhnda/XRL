@@ -181,7 +181,7 @@ def load_model(model_path: str, device: str = "cpu"):
     
     # Try importing from training script
     try:
-        from train_sae_logic_v3 import SAELogicAgentV3, SAELogicConfig
+        from train_sae_logic import SAELogicAgentV3, SAELogicConfig
         config = SAELogicConfig(**{k: v for k, v in config_dict.items() 
                                    if k in SAELogicConfig.__dataclass_fields__})
         model = SAELogicAgentV3(config, device=device)
@@ -206,7 +206,7 @@ def load_model(model_path: str, device: str = "cpu"):
               "sparse_concept_autoencoder.py is in the Python path.")
         sys.exit(1)
     
-    from train_sae_logic_v3 import SAELogicAgentV3, SAELogicConfig
+    from train_sae_logic import SAELogicAgentV3, SAELogicConfig
     config = SAELogicConfig(**{k: v for k, v in config_dict.items() 
                                if k in SAELogicConfig.__dataclass_fields__})
     model = SAELogicAgentV3(config, device=device)
