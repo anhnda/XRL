@@ -1,0 +1,6 @@
+import torch
+data = torch.load("./sae_logic_v3_outputs/training_data.pt", weights_only=False)
+obs = data['observations']
+print(f"Shape: {obs.shape}, dtype: {obs.dtype}")
+print(f"Sample obs[0]:\n{obs[0]}") 
+print(f"Unique obj types: {torch.unique(obs[:,:,:,0])}")
