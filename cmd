@@ -25,7 +25,7 @@ python collect_with_observations.py \
 
 # Step 2: Run visualization (point at the new file)
 python visualize_rule_features.py \
-    --features_path ./stage1_outputs/collected_data_with_obs.pt \
+    --features_path ./stage1_outputs/collected_data.pt \
     --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt
 
 python train_sae_logic.py \

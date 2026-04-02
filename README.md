@@ -81,6 +81,7 @@ python feature_space_analysis.py \
     --env_name MiniGrid-DoorKey-5x5-v0 \
     --n_episodes 2000 \
     --save_dir ./stage1_outputs
+
 python train_sae_logic.py \
     --features_path ./stage1_outputs/collected_data.pt \
     --stage1_path ./stage1_outputs/stage1_outputs.pt \
@@ -89,10 +90,15 @@ python train_sae_logic.py \
     --sae_pretrain_epochs 50 \
     --n_epochs 300 \
     --max_grad_norm 5.0
+
 python check_success_rules.py \
     --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
     --ppo_path ppo_doorkey_5x5.zip \
     --n_episodes 100 --print_rules
+
+python visualize_rule_features.py \
+    --features_path ./stage1_outputs/collected_data.pt \
+    --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt
     
 ### Step 1 — Feature space analysis
 
