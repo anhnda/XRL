@@ -16,6 +16,18 @@ python check_success_rules.py \
     --ppo_path ppo_doorkey_5x5.zip \
     --n_episodes 100 --print_rules
     
+# Step 1: Re-collect with observations (same model, same env, same episodes)
+python collect_with_observations.py \
+    --model_path ppo_doorkey_5x5.zip \
+    --env_name MiniGrid-DoorKey-5x5-v0 \
+    --n_episodes 2000 \
+    --save_path ./stage1_outputs/collected_data_with_obs.pt
+
+# Step 2: Run visualization (point at the new file)
+python visualize_rule_features.py \
+    --features_path ./stage1_outputs/collected_data_with_obs.pt \
+    --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt
+
 python train_sae_logic.py \
     --features_path ./stage1_outputs/collected_data.pt \
     --stage1_path ./stage1_outputs/stage1_outputs.pt \

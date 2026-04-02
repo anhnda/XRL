@@ -327,9 +327,14 @@ def parse_rules_for_features(rules: dict) -> dict:
 
 
 @torch.no_grad()
-def collect_feature_activations(model, features_tensor, device, batch_size=512):
+def collect_feature_activations(model, features_tensor, device, batch_size=512,
+                                pre_normalized=False):
     """
     Run frozen SAE over all data, return sparse activations (N, hidden_dim).
+    
+    Args:
+        pre_normalized: If True, features are already normalized (as during training).
+                       If False, apply model.normalize_input() first.
     """
     model.eval()
     all_z = []
@@ -337,9 +342,9 @@ def collect_feature_activations(model, features_tensor, device, batch_size=512):
     
     for i in range(0, n, batch_size):
         batch = features_tensor[i:i+batch_size].to(device)
-        # Normalize input the same way as training
-        batch_norm = model.normalize_input(batch)
-        z_sparse, _ = model.sae.encode(batch_norm)
+        if not pre_normalized:
+            batch = model.normalize_input(batch)
+        z_sparse, _ = model.sae.encode(batch)
         all_z.append(z_sparse.cpu())
     
     return torch.cat(all_z, dim=0)
@@ -542,6 +547,9 @@ def main():
     parser.add_argument("--game_name", type=str, default="MiniGrid",
                         help="Game name for prompt generation")
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--pre_normalized", action="store_true", default=False,
+                        help="Set if features are already normalized (e.g. from training_data.pt). "
+                             "Auto-detected if not set.")
     args = parser.parse_args()
     
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -596,6 +604,27 @@ def main():
     features_tensor = data['features']
     actions_tensor = data['actions']
     
+    # Detect whether features are already normalized (as in training).
+    # The training script saves pre-normalized features in 'training_data'.
+    # If loading raw collected_data.pt, features are RAW and need normalization.
+    # If loading training_data, features are ALREADY NORMALIZED.
+    pre_normalized = args.pre_normalized or data.get('pre_normalized', False)
+    
+    if not pre_normalized:
+        # Check if features look raw (large magnitude) vs normalized (near zero mean, unit std)
+        feat_mean = features_tensor.mean(0)
+        feat_std = features_tensor.std(0)
+        if feat_mean.abs().mean() > 1.0 or (feat_std.mean() - 1.0).abs() > 0.5:
+            print(f"  Features appear RAW (mean={feat_mean.mean():.2f}, std={feat_std.mean():.2f})")
+            print(f"  Will apply model's normalize_input() during SAE forward pass")
+            pre_normalized = False
+        else:
+            print(f"  Features appear PRE-NORMALIZED (mean={feat_mean.mean():.3f}, std={feat_std.mean():.3f})")
+            print(f"  Skipping normalize_input() to avoid double normalization")
+            pre_normalized = True
+    else:
+        print(f"  Data marked as pre_normalized=True")
+    
     # Observations — the key data for visualization
     if 'observations' in data:
         observations = data['observations']
@@ -619,8 +648,18 @@ def main():
     
     # ── Collect SAE activations ──
     print(f"\nRunning frozen SAE over {len(features_tensor)} samples...")
-    all_z = collect_feature_activations(model, features_tensor, device)
+    all_z = collect_feature_activations(model, features_tensor, device,
+                                         pre_normalized=pre_normalized)
     print(f"  Activations shape: {all_z.shape}")
+    
+    # Sanity check: activations should have variation
+    for fidx in sorted(parse_rules_for_features(rules).keys())[:3]:
+        z_col = all_z[:, fidx]
+        n_unique = len(torch.unique(z_col))
+        print(f"  Feature f_{fidx}: unique_values={n_unique}, "
+              f"range=[{z_col.min():.3f}, {z_col.max():.3f}], "
+              f"nonzero={( z_col > 0).sum().item()}/{len(z_col)}")
+    
     
     # ── Per-feature visualization ──
     print(f"\n{'='*70}")

@@ -784,6 +784,37 @@ def main(args):
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
+    # Save training data for visualization (if requested)
+    if getattr(args, 'save_training_data', False):
+        training_data_path = os.path.join(args.save_dir, "training_data.pt")
+        # Load observations if they exist in the source data
+        source_data = torch.load(args.features_path, weights_only=False)
+        obs = source_data.get('observations', source_data.get('obs', None))
+
+        save_dict = {
+            'features': features,           # NORMALIZED features (what the SAE sees)
+            'actions': actions,
+            'shuffle_indices': idx,          # permutation used for train/val split
+            'n_train': n_train,
+            'feature_mean': feat_mean,
+            'feature_std': feat_std,
+            'pre_normalized': True,          # flag: these are already normalized
+        }
+        if obs is not None:
+            if isinstance(obs, torch.Tensor):
+                save_dict['observations'] = obs
+            else:
+                save_dict['observations'] = torch.tensor(obs)
+            print(f"  Including observations: {save_dict['observations'].shape}")
+
+        torch.save(save_dict, training_data_path)
+        print(f"  Saved training data to {training_data_path}")
+        print(f"    features: {features.shape} (pre-normalized)")
+        print(f"    shuffle_indices: {idx.shape}")
+        print(f"    pre_normalized: True")
+ 
+
+
     action_names = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
     print(f"  Train: {len(train_ds)}, Val: {len(val_ds)}, Actions: {actions.max()+1}")
     print(f"\n  Class distribution:")
@@ -969,5 +1000,7 @@ if __name__ == "__main__":
         "--action_class_weights", type=float, nargs=7,
         default=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     )
+    parser.add_argument("--save_training_data", action="store_true",
+                    help="Save normalized features + observations for visualization")
     args = parser.parse_args()
     main(args)
