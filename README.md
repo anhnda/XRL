@@ -75,13 +75,14 @@ The two-stage design prevents gradient wars between SAE reconstruction and actio
 
 
 DoorKey5x5
-
+```bash
 python feature_space_analysis.py \
     --model_path ppo_doorkey_5x5.zip \
     --env_name MiniGrid-DoorKey-5x5-v0 \
     --n_episodes 2000 \
     --save_dir ./stage1_outputs
-
+```
+```bash
 python train_sae_logic.py \
     --features_path ./stage1_outputs/collected_data.pt \
     --stage1_path ./stage1_outputs/stage1_outputs.pt \
@@ -90,16 +91,18 @@ python train_sae_logic.py \
     --sae_pretrain_epochs 50 \
     --n_epochs 300 \
     --max_grad_norm 5.0
-
+```
+```bash
 python check_success_rules.py \
     --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
     --ppo_path ppo_doorkey_5x5.zip \
     --n_episodes 100 --print_rules
-
+```
+```bash
 python visualize_rule_features.py \
     --features_path ./stage1_outputs/collected_data.pt \
     --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt
-    
+```  
 ### Step 1 — Feature space analysis
 
 Collects rollouts from the frozen PPO, runs SVD and ICA on the feature space, and saves normalization stats and ICA directions for SAE initialization.
