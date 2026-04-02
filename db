@@ -1,6 +1,11 @@
-import torch
-data = torch.load("./sae_logic_v3_outputs/training_data.pt", weights_only=False)
-obs = data['observations']
-print(f"Shape: {obs.shape}, dtype: {obs.dtype}")
-print(f"Sample obs[0]:\n{obs[0]}") 
-print(f"Unique obj types: {torch.unique(obs[:,:,:,0])}")
+# quick_fix.py
+import torch, numpy as np
+data = torch.load("./stage1_outputs/collected_data.pt", weights_only=False)
+ckpt = torch.load("./sae_logic_v3_outputs/sae_logic_v3_model.pt", weights_only=False)
+
+# Normalize features with the same stats used during training
+data['features'] = (data['features'] - ckpt['feature_mean']) / ckpt['feature_std']
+data['pre_normalized'] = True
+
+torch.save(data, "./stage1_outputs/collected_data_normed.pt")
+print("Saved. Keys:", list(data.keys()))
