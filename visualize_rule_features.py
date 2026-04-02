@@ -222,6 +222,72 @@ def load_model(model_path: str, device: str = "cpu"):
 # Feature extraction
 # ──────────────────────────────────────────────────────────────────────
 
+def deduplicate_rules(rules: dict) -> dict:
+    """
+    Merge clauses that have identical literals but differ only in the bias term.
+    
+    e.g. two clauses:
+        (f_22 ∧ f_25 ∧ f_26 ∧ ¬f_81 ∧ ¬f_195 ∧ f_255) [bias=5.87]
+        (f_22 ∧ f_25 ∧ f_26 ∧ ¬f_81 ∧ ¬f_195 ∧ f_255) [bias=5.88]
+    become one clause with the average bias:
+        (f_22 ∧ f_25 ∧ f_26 ∧ ¬f_81 ∧ ¬f_195 ∧ f_255) [bias=5.88, x2]
+    """
+    import re
+    
+    deduped = {}
+    total_before = 0
+    total_after = 0
+    
+    for action_name, clauses in rules.items():
+        # Group clauses by their literal signature (everything before [bias=...])
+        groups = {}  # literal_key -> list of (bias_value, original_clause)
+        passthrough = []  # clauses we can't parse
+        
+        for clause in clauses:
+            if clause == "(no active clauses)":
+                passthrough.append(clause)
+                continue
+            
+            total_before += 1
+            
+            # Split into literals part and bias part
+            bias_match = re.search(r'\[bias=([-\d.]+)\]', clause)
+            if bias_match:
+                bias_val = float(bias_match.group(1))
+                # Extract the literal signature (strip whitespace for robust matching)
+                literal_part = clause[:bias_match.start()].strip()
+                # Normalize whitespace within the literal part
+                literal_key = re.sub(r'\s+', ' ', literal_part)
+                
+                if literal_key not in groups:
+                    groups[literal_key] = []
+                groups[literal_key].append(bias_val)
+            else:
+                passthrough.append(clause)
+                total_before -= 1  # don't count unparsed
+        
+        # Rebuild deduplicated clauses
+        merged = []
+        for literal_key, biases in groups.items():
+            avg_bias = sum(biases) / len(biases)
+            if len(biases) > 1:
+                merged.append(f"{literal_key} [bias={avg_bias:.2f}, x{len(biases)}]")
+            else:
+                merged.append(f"{literal_key} [bias={biases[0]:.2f}]")
+            total_after += 1
+        
+        deduped[action_name] = passthrough + merged
+    
+    n_merged = total_before - total_after
+    if n_merged > 0:
+        print(f"  Rule deduplication: {total_before} → {total_after} clauses "
+              f"({n_merged} duplicates merged)")
+    else:
+        print(f"  Rule deduplication: no duplicates found ({total_before} clauses)")
+    
+    return deduped
+
+
 def parse_rules_for_features(rules: dict) -> dict:
     """
     Parse the saved rules dict to extract which features appear in each action's rules,
@@ -497,10 +563,31 @@ def main():
                 rules = json.load(f)
     
     print(f"\nLoaded rules for {len(rules)} actions")
+    
+    # Deduplicate clauses that share identical literals (differ only in bias)
+    rules = deduplicate_rules(rules)
+    
     feature_info = parse_rules_for_features(rules)
     rule_features = sorted(feature_info.keys())
     print(f"Features appearing in rules: {rule_features}")
     print(f"  ({len(rule_features)} unique features to visualize)")
+    
+    # Print deduplicated rules
+    print(f"\n  Deduplicated rules:")
+    for action_name, clauses in rules.items():
+        active = [c for c in clauses if c != "(no active clauses)"]
+        if active:
+            print(f"    {action_name} ←")
+            for i, c in enumerate(active):
+                print(f"      {c}")
+                if i < len(active) - 1:
+                    print(f"    ∨")
+    
+    # Save deduplicated rules
+    deduped_path = os.path.join(args.save_dir, "deduplicated_rules.json")
+    with open(deduped_path, 'w') as f:
+        json.dump(rules, f, indent=2, ensure_ascii=False)
+    print(f"\n  Saved deduplicated rules to {deduped_path}")
     
     # ── Load data ──
     print(f"\nLoading data from {args.features_path}...")
