@@ -186,6 +186,7 @@ def load_model(model_path: str, device: str = "cpu"):
                                    if k in SAELogicConfig.__dataclass_fields__})
         model = SAELogicAgentV3(config, device=device)
         model.load_state_dict(state_dict)
+        model.to(device)
         model.eval()
         print(f"  Loaded model via train_sae_logic_v3 import")
         return model, config, checkpoint
@@ -211,16 +212,7 @@ def load_model(model_path: str, device: str = "cpu"):
                                if k in SAELogicConfig.__dataclass_fields__})
     model = SAELogicAgentV3(config, device=device)
     model.load_state_dict(state_dict)
-    
-    # Restore normalization buffers if saved separately
-    if 'z_mean' in checkpoint:
-        model.z_mean.copy_(checkpoint['z_mean'].to(device))
-    if 'z_std' in checkpoint:
-        model.z_std.copy_(checkpoint['z_std'].to(device))
-    if 'feature_mean' in checkpoint:
-        model.feature_mean.copy_(checkpoint['feature_mean'].to(device))
-    if 'feature_std' in checkpoint:
-        model.feature_std.copy_(checkpoint['feature_std'].to(device))
+    model.to(device)
     
     model.eval()
     return model, config, checkpoint
