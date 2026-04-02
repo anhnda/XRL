@@ -536,6 +536,47 @@ Give a short name (1-4 words) and a one-sentence explanation.
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Observation deduplication
+# ──────────────────────────────────────────────────────────────────────
+
+def _select_unique(candidate_indices, observations, k):
+    """
+    From a sorted list of candidate indices, select up to k with unique observations.
+    Uses observation bytes as hash key — two observations are "same" if identical grids.
+    Falls back to all candidates if observations is None.
+    """
+    if observations is None:
+        return candidate_indices[:k]
+    
+    selected = []
+    seen = set()
+    
+    for idx in candidate_indices:
+        obs = observations[idx]
+        # Hash the observation content
+        if isinstance(obs, np.ndarray):
+            obs_key = obs.tobytes()
+        else:
+            obs_key = np.array(obs).tobytes()
+        
+        if obs_key not in seen:
+            seen.add(obs_key)
+            selected.append(idx)
+            if len(selected) >= k:
+                break
+    
+    # If not enough unique, pad with remaining (allow duplicates)
+    if len(selected) < k:
+        for idx in candidate_indices:
+            if idx not in selected:
+                selected.append(idx)
+                if len(selected) >= k:
+                    break
+    
+    return np.array(selected[:k])
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────
 
@@ -684,17 +725,23 @@ def main():
         # Also keep sparse values for reference
         z_sparse_col = all_z_sparse[:, fidx].numpy()
         
-        # Top-K: highest bottleneck activation (feature = ON)
-        top_indices = np.argsort(z_bin_col)[::-1][:args.top_k]
-        # Bottom-K: lowest bottleneck activation (feature = OFF)
-        # Pick from samples where feature is clearly OFF (< 0.1)
+        # ── Select TOP-K unique observations ──
+        # Sort all by descending activation, then deduplicate by observation content
+        sorted_top = np.argsort(z_bin_col)[::-1]
+        top_indices = _select_unique(sorted_top, observations, args.top_k)
+        
+        # ── Select BOTTOM-K unique observations ──
+        # From samples where feature is clearly OFF (< 0.1), pick diverse ones
         off_mask = z_bin_col < 0.1
         if off_mask.sum() >= args.top_k:
-            off_indices = np.where(off_mask)[0]
+            off_candidates = np.where(off_mask)[0]
+            # Shuffle for diversity, then deduplicate
             rng = np.random.RandomState(42 + fidx)
-            bottom_indices = rng.choice(off_indices, size=args.top_k, replace=False)
+            rng.shuffle(off_candidates)
+            bottom_indices = _select_unique(off_candidates, observations, args.top_k)
         else:
-            bottom_indices = np.argsort(z_bin_col)[:args.top_k]
+            sorted_bot = np.argsort(z_bin_col)
+            bottom_indices = _select_unique(sorted_bot, observations, args.top_k)
         
         top_act_values = z_bin_col[top_indices]
         bottom_act_values = z_bin_col[bottom_indices]
@@ -702,7 +749,7 @@ def main():
         top_action_labels = [action_names[actions_tensor[i].item()] for i in top_indices]
         bottom_action_labels = [action_names[actions_tensor[i].item()] for i in bottom_indices]
         
-        print(f"    Top activation range: [{top_act_values[-1]:.3f}, {top_act_values[0]:.3f}]")
+        print(f"    Top activation range: [{top_act_values.min():.3f}, {top_act_values.max():.3f}]")
         print(f"    Bottom activation range: [{bottom_act_values.min():.3f}, {bottom_act_values.max():.3f}]")
         print(f"    Actions in rules: {info['polarities']}")
         
@@ -711,7 +758,6 @@ def main():
             top_obs = [observations[i] for i in top_indices]
             bottom_obs = [observations[i] for i in bottom_indices]
         else:
-            # Placeholder: render feature vectors as tiny heatmaps
             top_obs = [features_tensor[i].numpy().reshape(-1)[:49].reshape(7, 7) 
                        for i in top_indices]
             bottom_obs = [features_tensor[i].numpy().reshape(-1)[:49].reshape(7, 7)
