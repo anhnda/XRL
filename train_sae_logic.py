@@ -340,9 +340,13 @@ class SAELogicAgentV3(nn.Module):
               f"range=[{active_normed.min():.2f}, {active_normed.max():.2f}]")
         print(f"    Feature activity rate: {active_mask.float().mean():.3f}")
 
+    # def normalize_z(self, z: torch.Tensor) -> torch.Tensor:
+    #     return (z - self.z_mean) / self.z_std
     def normalize_z(self, z: torch.Tensor) -> torch.Tensor:
-        return (z - self.z_mean) / self.z_std
-
+        active_mask = z > 0
+        z_normed = (z - self.z_mean) / self.z_std
+        z_normed[~active_mask] = -5.0  # sigmoid(-5) ≈ 0.007 ≈ 0
+        return z_normed
     def freeze_sae(self):
         for param in self.sae.parameters():
             param.requires_grad = False
