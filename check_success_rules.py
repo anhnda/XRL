@@ -237,6 +237,8 @@ def make_vec_env(env_name: str, env_type: str, seed: int, render: bool = False):
         return env
 
     elif env_type == "atari":
+        import ale_py  # noqa: F401
+        gym.register_envs(ale_py)
         from stable_baselines3.common.env_util import make_atari_env
         from stable_baselines3.common.vec_env import VecFrameStack
 
@@ -246,6 +248,7 @@ def make_vec_env(env_name: str, env_type: str, seed: int, render: bool = False):
             seed=seed,
         )
         env = VecFrameStack(env, n_stack=4)
+        env = VecTransposeImage(env)
         return env
 
     else:
