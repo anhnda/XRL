@@ -2,39 +2,67 @@
 check_success_rules.py
 ======================
 Evaluate the SAELogicAgentV3 (trained logic rules) by playing MiniGrid
-and measuring success rate. Compares against the original PPO baseline.
+or Atari environments and measuring success rate. Compares against the
+original PPO baseline.
 
-Usage:
-    # Rules agent only
+Usage (MiniGrid):
     python check_success_rules.py \
         --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
         --ppo_path   ppo_doorkey_5x5.zip \
-        --env_name   MiniGrid-DoorKey-5x5-v0 \
         --n_episodes 100
 
-    # Rules agent + PPO baseline comparison
+Usage (Atari):
     python check_success_rules.py \
         --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
-        --ppo_path   ppo_doorkey_5x5.zip \
-        --compare_ppo
+        --ppo_path   ppo_atari_breakout.zip \
+        --n_episodes 100 --print_rules
+
+Usage (with PPO comparison):
+    python check_success_rules.py \
+        --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
+        --ppo_path   ppo_atari_breakout.zip \
+        --compare_ppo --n_episodes 100
 """
 
 import argparse
 import os
 
 import gymnasium as gym
-import minigrid  # noqa: F401
 import numpy as np
 import torch
 from dataclasses import asdict
-from minigrid.wrappers import ImgObsWrapper
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
+from stable_baselines3.common.atari_wrappers import AtariWrapper
 from tqdm import tqdm
 
-from train_sae_logic import SAELogicAgentV3, SAELogicConfig
+from train_sae_logic import SAELogicAgentV3, SAELogicConfig, get_action_names
 
-ACTION_NAMES = ["TurnLeft", "TurnRight", "Forward", "Pickup", "Drop", "Toggle", "Done"]
+
+# ============================================================================
+# Environment detection
+# ============================================================================
+
+def detect_env_type(env_name: str) -> str:
+    """Infer env type from the environment name string."""
+    name_lower = env_name.lower()
+    if "minigrid" in name_lower:
+        return "minigrid"
+    # Common Atari env name patterns
+    atari_keywords = [
+        "breakout", "pong", "spaceinvaders", "seaquest", "qbert",
+        "mspacman", "asteroids", "beamrider", "enduro", "freeway",
+        "frostbite", "montezuma", "pitfall", "riverraid", "tennis",
+        "assault", "atlantis", "bankheist", "battlezone", "bowling",
+        "boxing", "centipede", "demonattack", "gravitar", "hero",
+        "icehockey", "jamesbond", "kangaroo", "krull", "kungfumaster",
+        "phoenix", "robotank", "skiing", "solaris", "venture",
+        "videopinball", "wizardofwor", "zaxxon",
+        "atari", "ale/", "noframeskip", "deterministic",
+    ]
+    if any(kw in name_lower for kw in atari_keywords):
+        return "atari"
+    return "unknown"
 
 
 # ============================================================================
@@ -85,9 +113,14 @@ class RulesAgent:
 
         return action.cpu().numpy()
 
-    def print_rules(self):
+    def print_rules(self, action_names=None):
         """Print the learned rules being used."""
-        rules = self.logic_model.extract_rules(action_names=ACTION_NAMES)
+        if action_names is None:
+            action_names = get_action_names(
+                self.logic_model.config.n_actions,
+                env_type=detect_env_type(self.logic_model.config.env_name),
+            )
+        rules = self.logic_model.extract_rules(action_names=action_names)
         print("\n" + "=" * 60)
         print("ACTIVE LOGIC RULES")
         print("=" * 60)
@@ -104,8 +137,13 @@ class RulesAgent:
 # Model loading
 # ============================================================================
 
-def load_rules_agent(model_path: str, ppo_path: str, device: str) -> RulesAgent:
-    """Load SAELogicAgentV3 checkpoint and PPO feature extractor."""
+def load_rules_agent(model_path: str, ppo_path: str, device: str) -> tuple:
+    """
+    Load SAELogicAgentV3 checkpoint and PPO feature extractor.
+
+    Returns:
+        (RulesAgent, env_name, env_type, action_names)
+    """
     print(f"Loading PPO from {ppo_path}...")
     ppo_model = PPO.load(ppo_path, device=device)
 
@@ -120,8 +158,9 @@ def load_rules_agent(model_path: str, ppo_path: str, device: str) -> RulesAgent:
     config = SAELogicConfig(**config_dict)
     logic_model = SAELogicAgentV3(config, device=device)
     logic_model.load_state_dict(ckpt['model_state'])
-    logic_model.to(device)  # ← add this line
+    logic_model.to(device)
     logic_model.eval()
+
     # Restore input normalization stats
     feat_mean = ckpt['feature_mean'].to(device)
     feat_std  = ckpt['feature_std'].to(device)
@@ -132,29 +171,91 @@ def load_rules_agent(model_path: str, ppo_path: str, device: str) -> RulesAgent:
         logic_model.z_mean.copy_(ckpt['z_mean'].to(device))
         logic_model.z_std.copy_(ckpt['z_std'].to(device))
 
+    # Resolve env metadata from checkpoint
+    env_name = ckpt.get('env_name', config.env_name)
+    env_type = ckpt.get('env_type', config.env_type)
+    action_names_stored = ckpt.get('action_names', None)
+    action_names = get_action_names(config.n_actions, action_names_stored, env_type)
+
     print(f"  Val accuracy at save: {ckpt['best_val_acc']:.3f}")
+    print(f"  Env: {env_name} (type={env_type})")
+    print(f"  Actions: {action_names}")
     print(f"  Architecture: {config.input_dim}d → SAE({config.hidden_dim}, k={config.k})"
           f" → FixedNorm → Sigmoid → Logic({config.n_clauses_per_action} clauses/action)"
           f" → {config.n_actions} actions")
 
-    return RulesAgent(ppo_model, logic_model, device)
+    agent = RulesAgent(ppo_model, logic_model, device)
+    return agent, env_name, env_type, action_names
 
 
 # ============================================================================
 # Environment factory
 # ============================================================================
 
-def make_vec_env(env_name: str, seed: int, render: bool = False):
-    def _make():
-        def _init():
-            e = gym.make(env_name, render_mode="human" if render else None)
-            return ImgObsWrapper(e)
-        return _init
+def make_vec_env(env_name: str, env_type: str, seed: int, render: bool = False):
+    """
+    Create a VecEnv with the appropriate wrappers for MiniGrid or Atari.
+    """
+    if env_type == "minigrid":
+        import minigrid  # noqa: F401
+        from minigrid.wrappers import ImgObsWrapper
 
-    env = DummyVecEnv([_make()])
-    env = VecTransposeImage(env)
-    env.seed(seed)
-    return env
+        def _make():
+            def _init():
+                e = gym.make(env_name, render_mode="human" if render else None)
+                return ImgObsWrapper(e)
+            return _init
+
+        env = DummyVecEnv([_make()])
+        env = VecTransposeImage(env)
+        env.seed(seed)
+        return env
+
+    elif env_type == "atari":
+        from stable_baselines3.common.env_util import make_atari_env
+        from stable_baselines3.common.vec_env import VecFrameStack
+
+        env = make_atari_env(
+            env_name,
+            n_envs=1,
+            seed=seed,
+        )
+        env = VecFrameStack(env, n_stack=4)
+        return env
+
+    else:
+        # Generic fallback: try to create without special wrappers
+        print(f"  [Warning] Unknown env_type '{env_type}', using generic wrapper.")
+        def _make():
+            def _init():
+                return gym.make(env_name, render_mode="human" if render else None)
+            return _init
+
+        env = DummyVecEnv([_make()])
+        # Only transpose if obs is image-like (4D)
+        sample = env.observation_space.shape
+        if len(sample) == 3:
+            env = VecTransposeImage(env)
+        env.seed(seed)
+        return env
+
+
+# ============================================================================
+# Success criteria per env type
+# ============================================================================
+
+def is_success(reward: float, info: dict, env_type: str) -> bool:
+    """
+    Determine whether an episode was successful.
+
+    - MiniGrid: final reward > 0 means the agent reached the goal.
+    - Atari: any positive total episode reward counts as success.
+      (This is checked at episode end using cumulative reward.)
+    """
+    if env_type == "minigrid":
+        return reward > 0
+    # For Atari, success is determined by total episode reward (checked externally)
+    return False  # placeholder — Atari uses cumulative reward
 
 
 # ============================================================================
@@ -164,6 +265,8 @@ def make_vec_env(env_name: str, seed: int, render: bool = False):
 def evaluate_rules_agent(
     agent: RulesAgent,
     env_name: str,
+    env_type: str,
+    action_names: list,
     n_episodes: int = 100,
     max_steps: int = 500,
     seed: int = 42,
@@ -173,49 +276,88 @@ def evaluate_rules_agent(
     """
     Play n_episodes and collect success rate, reward, and episode length.
 
-    A MiniGrid episode is successful when the final reward > 0.
+    Success criteria:
+      - MiniGrid: episode ends with reward > 0
+      - Atari: total episode reward > 0
     """
-    env = make_vec_env(env_name, seed, render)
+    env = make_vec_env(env_name, env_type, seed, render)
 
-    successes      = 0
-    total_rewards  = []
+    successes       = 0
+    total_rewards   = []
     episode_lengths = []
-    action_counts  = np.zeros(len(ACTION_NAMES), dtype=int)
+    action_counts   = np.zeros(len(action_names), dtype=int)
+
+    # Atari may report episode stats through info['episode']
+    is_atari = (env_type == "atari")
 
     pbar = tqdm(total=n_episodes, desc="Rules agent")
 
-    for ep in range(n_episodes):
-        obs          = env.reset()
-        ep_reward    = 0.0
-        ep_length    = 0
-        ep_actions   = []
+    ep = 0
+    obs = env.reset()
+    ep_reward  = 0.0
+    ep_length  = 0
+    ep_actions = []
 
-        for _ in range(max_steps):
-            action = agent.predict(obs)
-            obs, reward, done, info = env.step(action)
+    while ep < n_episodes:
+        action = agent.predict(obs)
+        obs, reward, done, info = env.step(action)
 
-            ep_reward  += reward[0]
-            ep_length  += 1
-            ep_actions.append(int(action[0]))
-            action_counts[int(action[0])] += 1
+        ep_reward += reward[0]
+        ep_length += 1
+        act_idx = int(action[0])
+        if act_idx < len(action_names):
+            ep_actions.append(act_idx)
+            action_counts[act_idx] += 1
 
-            if done[0]:
+        if done[0]:
+            # Determine success
+            if is_atari:
+                # For Atari with SB3 wrappers, true episode reward may be in info
+                true_reward = ep_reward
+                if isinstance(info, (list, tuple)) and len(info) > 0:
+                    ep_info = info[0].get('episode', None)
+                    if ep_info is not None:
+                        true_reward = ep_info.get('r', ep_reward)
+                if true_reward > 0:
+                    successes += 1
+            else:
+                # MiniGrid: final step reward > 0
                 if reward[0] > 0:
                     successes += 1
                 elif verbose_failures:
-                    action_seq = [ACTION_NAMES[a] for a in ep_actions[-10:]]
-                    print(f"\n  [Ep {ep+1}] FAILED — last 10 actions: {action_seq}")
-                break
+                    last_acts = [action_names[a] for a in ep_actions[-10:]]
+                    print(f"\n  [Ep {ep+1}] FAILED — last 10 actions: {last_acts}")
 
-        total_rewards.append(ep_reward)
-        episode_lengths.append(ep_length)
+            total_rewards.append(ep_reward)
+            episode_lengths.append(ep_length)
+            ep += 1
+            pbar.update(1)
+            pbar.set_postfix({
+                'success': f'{100.0 * successes / ep:.1f}%',
+                'avg_r':   f'{np.mean(total_rewards):.3f}',
+                'avg_len': f'{np.mean(episode_lengths):.1f}',
+            })
 
-        pbar.update(1)
-        pbar.set_postfix({
-            'success': f'{100.0 * successes / (ep + 1):.1f}%',
-            'avg_r':   f'{np.mean(total_rewards):.3f}',
-            'avg_len': f'{np.mean(episode_lengths):.1f}',
-        })
+            # Reset episode tracking (env auto-resets in VecEnv)
+            ep_reward  = 0.0
+            ep_length  = 0
+            ep_actions = []
+
+        # Safety: for non-VecEnv auto-reset setups, cap steps
+        if not done[0] and ep_length >= max_steps:
+            total_rewards.append(ep_reward)
+            episode_lengths.append(ep_length)
+            ep += 1
+            pbar.update(1)
+            pbar.set_postfix({
+                'success': f'{100.0 * successes / ep:.1f}%',
+                'avg_r':   f'{np.mean(total_rewards):.3f}',
+                'avg_len': f'{np.mean(episode_lengths):.1f}',
+            })
+            obs = env.reset()
+            ep_reward  = 0.0
+            ep_length  = 0
+            ep_actions = []
 
     pbar.close()
     env.close()
@@ -225,6 +367,7 @@ def evaluate_rules_agent(
     print("\n" + "=" * 60)
     print("RULES AGENT — EVALUATION RESULTS")
     print("=" * 60)
+    print(f"  Environment:      {env_name} ({env_type})")
     print(f"  Episodes:         {n_episodes}")
     print(f"  Successes:        {successes}/{n_episodes}")
     print(f"  Success rate:     {success_rate:.2f}%")
@@ -232,9 +375,9 @@ def evaluate_rules_agent(
     print(f"  Avg ep length:    {np.mean(episode_lengths):.1f} ± {np.std(episode_lengths):.1f}")
     print(f"\n  Action usage during play:")
     total_actions = action_counts.sum()
-    for name, cnt in zip(ACTION_NAMES, action_counts):
+    for name, cnt in zip(action_names, action_counts):
         bar = "█" * int(40 * cnt / max(total_actions, 1))
-        print(f"    {name:10s}: {cnt:6d} ({100.0*cnt/max(total_actions,1):5.1f}%) {bar}")
+        print(f"    {name:14s}: {cnt:6d} ({100.0*cnt/max(total_actions,1):5.1f}%) {bar}")
     print("=" * 60)
 
     return {
@@ -256,44 +399,70 @@ def evaluate_rules_agent(
 def evaluate_ppo_baseline(
     ppo_model: PPO,
     env_name: str,
+    env_type: str,
     n_episodes: int = 100,
     max_steps: int = 500,
     seed: int = 42,
 ) -> dict:
     """Evaluate original PPO policy as baseline."""
-    env = make_vec_env(env_name, seed)
+    env = make_vec_env(env_name, env_type, seed)
 
-    successes      = 0
-    total_rewards  = []
+    is_atari = (env_type == "atari")
+
+    successes       = 0
+    total_rewards   = []
     episode_lengths = []
 
     pbar = tqdm(total=n_episodes, desc="PPO baseline")
 
-    for ep in range(n_episodes):
-        obs       = env.reset()
-        ep_reward = 0.0
-        ep_length = 0
+    ep = 0
+    obs = env.reset()
+    ep_reward = 0.0
+    ep_length = 0
 
-        for _ in range(max_steps):
-            action, _ = ppo_model.predict(obs, deterministic=False)
-            obs, reward, done, info = env.step(action)
+    while ep < n_episodes:
+        action, _ = ppo_model.predict(obs, deterministic=False)
+        obs, reward, done, info = env.step(action)
 
-            ep_reward += reward[0]
-            ep_length += 1
+        ep_reward += reward[0]
+        ep_length += 1
 
-            if done[0]:
+        if done[0]:
+            if is_atari:
+                true_reward = ep_reward
+                if isinstance(info, (list, tuple)) and len(info) > 0:
+                    ep_info = info[0].get('episode', None)
+                    if ep_info is not None:
+                        true_reward = ep_info.get('r', ep_reward)
+                if true_reward > 0:
+                    successes += 1
+            else:
                 if reward[0] > 0:
                     successes += 1
-                break
 
-        total_rewards.append(ep_reward)
-        episode_lengths.append(ep_length)
+            total_rewards.append(ep_reward)
+            episode_lengths.append(ep_length)
+            ep += 1
+            pbar.update(1)
+            pbar.set_postfix({
+                'success': f'{100.0 * successes / ep:.1f}%',
+                'avg_r':   f'{np.mean(total_rewards):.3f}',
+            })
+            ep_reward = 0.0
+            ep_length = 0
 
-        pbar.update(1)
-        pbar.set_postfix({
-            'success': f'{100.0 * successes / (ep + 1):.1f}%',
-            'avg_r':   f'{np.mean(total_rewards):.3f}',
-        })
+        if not done[0] and ep_length >= max_steps:
+            total_rewards.append(ep_reward)
+            episode_lengths.append(ep_length)
+            ep += 1
+            pbar.update(1)
+            pbar.set_postfix({
+                'success': f'{100.0 * successes / ep:.1f}%',
+                'avg_r':   f'{np.mean(total_rewards):.3f}',
+            })
+            obs = env.reset()
+            ep_reward = 0.0
+            ep_length = 0
 
     pbar.close()
     env.close()
@@ -303,6 +472,7 @@ def evaluate_ppo_baseline(
     print("\n" + "=" * 60)
     print("PPO BASELINE — EVALUATION RESULTS")
     print("=" * 60)
+    print(f"  Environment:   {env_name} ({env_type})")
     print(f"  Episodes:      {n_episodes}")
     print(f"  Successes:     {successes}/{n_episodes}")
     print(f"  Success rate:  {success_rate:.2f}%")
@@ -356,7 +526,29 @@ def print_comparison(rules_results: dict, ppo_results: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate SAELogicAgentV3 logic rules by playing MiniGrid"
+        description="Evaluate SAELogicAgentV3 logic rules by playing MiniGrid or Atari",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # MiniGrid
+  python check_success_rules.py \\
+      --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \\
+      --ppo_path ppo_doorkey_5x5.zip \\
+      --n_episodes 100
+
+  # Atari Breakout
+  python check_success_rules.py \\
+      --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \\
+      --ppo_path ppo_atari_breakout.zip \\
+      --n_episodes 100 --print_rules
+
+  # Override auto-detected env (if checkpoint lacks metadata)
+  python check_success_rules.py \\
+      --model_path ./model.pt \\
+      --ppo_path ppo.zip \\
+      --env_name BreakoutNoFrameskip-v4 \\
+      --env_type atari
+        """
     )
     parser.add_argument("--model_path",  type=str,
                         default="./sae_logic_v3_outputs/sae_logic_v3_model.pt",
@@ -364,11 +556,15 @@ def main():
     parser.add_argument("--ppo_path",    type=str,
                         default="ppo_doorkey_5x5.zip",
                         help="Path to PPO model (for feature extraction and baseline)")
-    parser.add_argument("--env_name",    type=str,
-                        default="MiniGrid-DoorKey-5x5-v0")
+    parser.add_argument("--env_name",    type=str, default=None,
+                        help="Override env name (auto-detected from checkpoint if not set)")
+    parser.add_argument("--env_type",    type=str, default=None,
+                        choices=["minigrid", "atari"],
+                        help="Override env type (auto-detected from checkpoint if not set)")
     parser.add_argument("--n_episodes",  type=int,  default=100)
     parser.add_argument("--max_steps",   type=int,  default=500,
-                        help="Max steps per episode before forced termination")
+                        help="Max steps per episode before forced termination "
+                             "(default 500; Atari may need more, e.g. 10000)")
     parser.add_argument("--seed",        type=int,  default=42)
     parser.add_argument("--compare_ppo", action="store_true",
                         help="Also run PPO baseline for comparison")
@@ -384,16 +580,40 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # Load rules agent
-    agent = load_rules_agent(args.model_path, args.ppo_path, device)
+    # Load rules agent + metadata from checkpoint
+    agent, ckpt_env_name, ckpt_env_type, action_names = load_rules_agent(
+        args.model_path, args.ppo_path, device
+    )
+
+    # CLI overrides take priority over checkpoint metadata
+    env_name = args.env_name or ckpt_env_name
+    env_type = args.env_type or ckpt_env_type
+
+    # If env_type is still unknown, try to detect from env_name
+    if env_type in (None, "unknown", ""):
+        env_type = detect_env_type(env_name)
+        if env_type == "unknown":
+            print(f"  [Warning] Could not detect env type for '{env_name}'. "
+                  f"Use --env_type to specify.")
+
+    # For Atari, bump default max_steps if user didn't explicitly set it
+    if env_type == "atari" and args.max_steps == 500:
+        args.max_steps = 10000
+        print(f"  [Info] Atari detected — using max_steps={args.max_steps}")
+
+    print(f"\n  Environment: {env_name}")
+    print(f"  Type:        {env_type}")
+    print(f"  Actions:     {action_names}")
 
     if args.print_rules:
-        agent.print_rules()
+        agent.print_rules(action_names=action_names)
 
     # Evaluate rules agent
     rules_results = evaluate_rules_agent(
         agent,
-        env_name=args.env_name,
+        env_name=env_name,
+        env_type=env_type,
+        action_names=action_names,
         n_episodes=args.n_episodes,
         max_steps=args.max_steps,
         seed=args.seed,
@@ -405,7 +625,8 @@ def main():
     if args.compare_ppo:
         ppo_results = evaluate_ppo_baseline(
             agent.ppo_model,
-            env_name=args.env_name,
+            env_name=env_name,
+            env_type=env_type,
             n_episodes=args.n_episodes,
             max_steps=args.max_steps,
             seed=args.seed,

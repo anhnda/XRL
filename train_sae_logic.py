@@ -19,7 +19,7 @@ No learnable scaler. No gradient wars. The logic layer sees a stable feature
 space from the start.
 
 Usage (MiniGrid):
-    python train_sae_logic_v3.py \\
+    python train_sae_logic.py \\
         --features_path ./stage1_outputs/collected_data.pt \\
         --stage1_path ./stage1_outputs/stage1_outputs.pt \\
         --hidden_dim 300 --k 50 \\
@@ -29,7 +29,7 @@ Usage (MiniGrid):
         --save_dir ./sae_logic_v3_outputs
 
 Usage (Atari Breakout):
-    python train_sae_logic_v3.py \\
+    python train_sae_logic.py \\
         --features_path ./stage1_atari/collected_data.pt \\
         --stage1_path ./stage1_atari/stage1_outputs.pt \\
         --hidden_dim 1024 --k 100 \\
