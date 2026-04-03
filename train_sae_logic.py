@@ -161,7 +161,7 @@ class ProductTNormLogicLayer(nn.Module):
 
         clauses = torch.sigmoid(log_clause_sum + self.clause_weight.unsqueeze(0))
         clauses = clauses.view(batch_size, self.n_actions, self.n_clauses_per_action)
-        return clauses.sum(dim=-1) + self.action_bias
+        return clauses.sum(dim=-1)
 
     def complexity_penalty(self) -> torch.Tensor:
         p, n = self._get_selection_probs()
