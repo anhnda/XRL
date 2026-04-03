@@ -43,6 +43,31 @@ from train_sae_logic import SAELogicAgentV3, SAELogicConfig, get_action_names
 # Environment detection
 # ============================================================================
 
+def _get_env_name_from_ppo(ppo_model: PPO) -> str:
+    """Try to extract the environment name from a loaded PPO model."""
+    # SB3 stores env metadata in several places
+    try:
+        # Method 1: get_env() wrapper
+        env = ppo_model.get_env()
+        if env is not None:
+            spec = getattr(env, 'spec', None)
+            if spec and hasattr(spec, 'id'):
+                return spec.id
+    except Exception:
+        pass
+
+    try:
+        # Method 2: model's stored env name in _custom_objects or kwargs
+        if hasattr(ppo_model, '_custom_objects') and ppo_model._custom_objects:
+            env_name = ppo_model._custom_objects.get('env_name', None)
+            if env_name:
+                return env_name
+    except Exception:
+        pass
+
+    return None
+
+
 def detect_env_type(env_name: str) -> str:
     """Infer env type from the environment name string."""
     name_lower = env_name.lower()
@@ -589,12 +614,29 @@ Examples:
     env_name = args.env_name or ckpt_env_name
     env_type = args.env_type or ckpt_env_type
 
+    # If checkpoint had "unknown", try to extract env name from PPO model
+    if env_name in (None, "unknown", ""):
+        ppo_env_name = _get_env_name_from_ppo(agent.ppo_model)
+        if ppo_env_name:
+            env_name = ppo_env_name
+            print(f"  [Info] Detected env from PPO model: {env_name}")
+
+    # Validate env_name before proceeding
+    if env_name in (None, "unknown", ""):
+        parser.error(
+            "Could not determine environment name from checkpoint or PPO model.\n"
+            "Please specify --env_name explicitly, e.g.:\n"
+            "  --env_name MiniGrid-DoorKey-5x5-v0\n"
+            "  --env_name BreakoutNoFrameskip-v4"
+        )
+
     # If env_type is still unknown, try to detect from env_name
     if env_type in (None, "unknown", ""):
         env_type = detect_env_type(env_name)
         if env_type == "unknown":
             print(f"  [Warning] Could not detect env type for '{env_name}'. "
-                  f"Use --env_type to specify.")
+                  f"Use --env_type to specify. Defaulting to 'minigrid'.")
+            env_type = "minigrid"
 
     # For Atari, bump default max_steps if user didn't explicitly set it
     if env_type == "atari" and args.max_steps == 500:
