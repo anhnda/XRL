@@ -43,6 +43,7 @@ import argparse
 import json
 import os
 from dataclasses import dataclass, asdict, field
+from pyexpat import model
 from typing import Optional, Dict, List
 
 import numpy as np
@@ -133,13 +134,19 @@ class ProductTNormLogicLayer(nn.Module):
         self.w_pos = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01 - 3.0)
         self.w_neg = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01 - 3.0)
         self.clause_weight = nn.Parameter(torch.ones(total_clauses) * 2.0)
+        self.action_bias = nn.Parameter(torch.zeros(n_actions))
 
     def _get_selection_probs(self):
         absent_logit = torch.zeros_like(self.w_pos)
         logits = torch.stack([self.w_pos, self.w_neg, absent_logit], dim=-1)
         probs = F.softmax(logits, dim=-1)
         return probs[..., 0], probs[..., 1]
-
+    def clause_activity_loss(self):
+        p, n = self._get_selection_probs()
+        activity = (p + n).sum(dim=-1)  # per-clause total selection
+        activity = activity.view(self.n_actions, self.n_clauses_per_action)
+        per_action = activity.mean(dim=-1)  # avg activity per action
+        return -per_action.min()  # encourage least-active action to develop rules
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         batch_size = features.shape[0]
         p, n = self._get_selection_probs()
@@ -154,7 +161,7 @@ class ProductTNormLogicLayer(nn.Module):
 
         clauses = torch.sigmoid(log_clause_sum + self.clause_weight.unsqueeze(0))
         clauses = clauses.view(batch_size, self.n_actions, self.n_clauses_per_action)
-        return clauses.sum(dim=-1)
+        return clauses.sum(dim=-1) + self.action_bias
 
     def complexity_penalty(self) -> torch.Tensor:
         p, n = self._get_selection_probs()
@@ -574,11 +581,12 @@ def train_logic(model, train_loader, val_loader, config, device, action_names):
             bimodal_loss = bimodal_weight * bimodal_raw
 
             logic_complexity = model.logic_layer.complexity_penalty()
+            clause_activity = model.logic_layer.clause_activity_loss()
 
             total_loss = (
                 config.beta_action * action_loss +
                 bimodal_loss +
-                logic_complexity
+                logic_complexity + 0.1 * clause_activity
             )
 
             optimizer.zero_grad()
