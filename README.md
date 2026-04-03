@@ -96,6 +96,12 @@ python train_sae_logic.py \
     --stage1_path   ./stage1_atari/stage1_outputs.pt \
     --hidden_dim 1024 --k 100
 
+python check_success_rules.py \
+    --model_path ./sae_logic_atari/sae_logic_v3_model.pt \
+    --ppo_path ppo_atari_breakout.zip \
+    --env_name "ALE/Breakout-v5" \
+    --n_episodes 100 --print_rules
+
 DoorKey5x5
 
 python feature_space_analysis.py \

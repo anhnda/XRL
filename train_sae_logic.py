@@ -781,6 +781,23 @@ def main(args):
     val_ds = TensorDataset(features[idx[n_train:]], actions[idx[n_train:]])
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+    # Add after train_loader/val_loader creation
+    print("\n  === RAW FEATURE LINEAR PROBE ===")
+    _probe = nn.Linear(features.shape[1], n_actions).to(device)
+    _opt = torch.optim.Adam(_probe.parameters(), lr=1e-3)
+    for _ in range(100):
+        for bx, ba in train_loader:
+            bx, ba = bx.to(device), ba.to(device)
+            _opt.zero_grad()
+            F.cross_entropy(_probe(bx), ba).backward()
+            _opt.step()
+    _correct = 0
+    with torch.no_grad():
+        for bx, ba in val_loader:
+            bx, ba = bx.to(device), ba.to(device)
+            _correct += (_probe(bx).argmax(1) == ba).sum().item()
+    print(f"  Raw 512-d feature linear probe val acc: {_correct/len(val_ds):.3f}")
+
 
     print(f"  Train: {len(train_ds)}, Val: {len(val_ds)}")
     print(f"\n  Class distribution:")
