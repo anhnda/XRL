@@ -383,28 +383,102 @@ class SAELogicAgentV3(nn.Module):
 # Stage 1: SAE Pre-training
 # ============================================================================
 
+# def pretrain_sae(model, train_loader, config, device):
+#     print("\n" + "=" * 70)
+#     print("STAGE 1: SAE PRE-TRAINING (reconstruction only)")
+#     print("=" * 70)
+
+#     optimizer = torch.optim.Adam(model.sae.parameters(), lr=config.sae_lr)
+#     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+#         optimizer, T_max=config.sae_pretrain_epochs, eta_min=1e-5
+#     )
+
+#     for epoch in range(config.sae_pretrain_epochs):
+#         model.sae.train()
+#         epoch_recon, epoch_sparsity = [], []
+
+#         for batch_x, _ in train_loader:
+#             batch_x = batch_x.to(device)
+#             z_sparse, z_pre = model.sae.encode(batch_x)
+#             x_recon = model.sae.decode(z_sparse)
+
+#             recon_loss = F.mse_loss(x_recon, batch_x)
+#             sparsity_loss = config.lambda_sparsity * z_pre.abs().mean()
+#             loss = config.alpha_recon * recon_loss + sparsity_loss
+
+#             optimizer.zero_grad()
+#             loss.backward()
+#             with torch.no_grad():
+#                 model.sae._normalize_decoder()
+#             optimizer.step()
+
+#             epoch_recon.append(recon_loss.item())
+#             epoch_sparsity.append(sparsity_loss.item())
+
+#         scheduler.step()
+
+#         if (epoch + 1) % config.log_every == 0:
+#             with torch.no_grad():
+#                 batch_x, _ = next(iter(train_loader))
+#                 batch_x = batch_x.to(device)
+#                 z_sparse, _ = model.sae.encode(batch_x)
+#                 density = (z_sparse > 0).float().mean().item()
+#                 z_active_mean = z_sparse[z_sparse > 0].mean().item() if (z_sparse > 0).any() else 0
+
+#             print(
+#                 f"  Epoch {epoch+1}/{config.sae_pretrain_epochs} | "
+#                 f"Recon: {np.mean(epoch_recon):.4f} | "
+#                 f"Sparsity: {np.mean(epoch_sparsity):.4f} | "
+#                 f"Density: {density:.3f} | "
+#                 f"ActiveMean: {z_active_mean:.1f}"
+#             )
+
+#     model.sae.eval()
+#     total_recon, n_batches = 0, 0
+#     with torch.no_grad():
+#         for batch_x, _ in train_loader:
+#             batch_x = batch_x.to(device)
+#             z_sparse, _ = model.sae.encode(batch_x)
+#             x_recon = model.sae.decode(z_sparse)
+#             total_recon += F.mse_loss(x_recon, batch_x).item()
+#             n_batches += 1
+#     print(f"\n  Final reconstruction MSE: {total_recon / n_batches:.4f}")
+
 def pretrain_sae(model, train_loader, config, device):
     print("\n" + "=" * 70)
-    print("STAGE 1: SAE PRE-TRAINING (reconstruction only)")
+    print("STAGE 1: SAE PRE-TRAINING (reconstruction + action auxiliary)")
     print("=" * 70)
 
-    optimizer = torch.optim.Adam(model.sae.parameters(), lr=config.sae_lr)
+    # Auxiliary action predictor on SAE latents
+    action_head = nn.Linear(config.hidden_dim, config.n_actions).to(device)
+    
+    optimizer = torch.optim.Adam(
+        list(model.sae.parameters()) + list(action_head.parameters()),
+        lr=config.sae_lr
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=config.sae_pretrain_epochs, eta_min=1e-5
     )
 
+    lambda_action_aux = 0.5  # weight for action prediction loss
+
     for epoch in range(config.sae_pretrain_epochs):
         model.sae.train()
-        epoch_recon, epoch_sparsity = [], []
+        action_head.train()
+        epoch_recon, epoch_sparsity, epoch_act = [], [], []
 
-        for batch_x, _ in train_loader:
-            batch_x = batch_x.to(device)
+        for batch_x, batch_a in train_loader:
+            batch_x, batch_a = batch_x.to(device), batch_a.to(device)
             z_sparse, z_pre = model.sae.encode(batch_x)
             x_recon = model.sae.decode(z_sparse)
 
             recon_loss = F.mse_loss(x_recon, batch_x)
             sparsity_loss = config.lambda_sparsity * z_pre.abs().mean()
-            loss = config.alpha_recon * recon_loss + sparsity_loss
+            action_loss = F.cross_entropy(action_head(z_sparse), batch_a)
+            
+            loss = (config.alpha_recon * recon_loss 
+                    + sparsity_loss 
+                    + lambda_action_aux * action_loss)
 
             optimizer.zero_grad()
             loss.backward()
@@ -414,37 +488,26 @@ def pretrain_sae(model, train_loader, config, device):
 
             epoch_recon.append(recon_loss.item())
             epoch_sparsity.append(sparsity_loss.item())
+            epoch_act.append(action_loss.item())
 
         scheduler.step()
 
         if (epoch + 1) % config.log_every == 0:
             with torch.no_grad():
-                batch_x, _ = next(iter(train_loader))
+                batch_x, batch_a = next(iter(train_loader))
                 batch_x = batch_x.to(device)
                 z_sparse, _ = model.sae.encode(batch_x)
                 density = (z_sparse > 0).float().mean().item()
-                z_active_mean = z_sparse[z_sparse > 0].mean().item() if (z_sparse > 0).any() else 0
+                act_acc = (action_head(z_sparse).argmax(1) == batch_a.to(device)).float().mean().item()
 
             print(
                 f"  Epoch {epoch+1}/{config.sae_pretrain_epochs} | "
                 f"Recon: {np.mean(epoch_recon):.4f} | "
-                f"Sparsity: {np.mean(epoch_sparsity):.4f} | "
-                f"Density: {density:.3f} | "
-                f"ActiveMean: {z_active_mean:.1f}"
+                f"ActLoss: {np.mean(epoch_act):.4f} | "
+                f"ActAcc: {act_acc:.3f} | "
+                f"Density: {density:.3f}"
             )
-
-    model.sae.eval()
-    total_recon, n_batches = 0, 0
-    with torch.no_grad():
-        for batch_x, _ in train_loader:
-            batch_x = batch_x.to(device)
-            z_sparse, _ = model.sae.encode(batch_x)
-            x_recon = model.sae.decode(z_sparse)
-            total_recon += F.mse_loss(x_recon, batch_x).item()
-            n_batches += 1
-    print(f"\n  Final reconstruction MSE: {total_recon / n_batches:.4f}")
-
-
+    # action_head is discarded — only SAE is kept
 # ============================================================================
 # Stage 2: Logic Training
 # ============================================================================
