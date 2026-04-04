@@ -1,3 +1,51 @@
+Atari Next good 94%
+python feature_space_analysis.py \
+    --model_path ppo_atari_breakout.zip \
+    --env_name "ALE/Breakout-v5" \
+    --n_episodes 4000 \
+    --save_dir ./stage1_atari
+
+python train_sae_logic.py \                                                                                                 
+    --features_path ./stage1_atari/collected_data.pt \                                                                      
+    --stage1_path ./stage1_atari/stage1_outputs.pt \                                                                        
+    --hidden_dim 256 --k 60 \                                                                                               
+    --n_clauses_per_action 40 \                                                                                             
+    --sae_pretrain_epochs 150 \                                                                                             
+    --n_epochs 500 \                                                                                                        
+    --logic_lr 3e-3 --bottleneck_lr 1e-2 \
+    --beta_action 5.0 --l0_penalty 5e-6 \
+    --lambda_sparsity 5e-4 \
+    --bimodal_max 0.2 --bimodal_warmup 60 --bimodal_ramp 150 \ 
+    --action_class_weights 1.0 2.0 1.2 1.0 \
+    --save_dir ./sae_logic_atari_E
+python check_success_rules.py \
+    --model_path ./sae_logic_atari_E/sae_logic_v3_model.pt \
+    --ppo_path ppo_atari_breakout.zip \
+    --env_name "ALE/Breakout-v5" \
+    --n_episodes 100 --print_rules
+
+python train_sae_logic.py \
+    --features_path ./stage1_atari/collected_data.pt \
+    --stage1_path ./stage1_atari/stage1_outputs.pt \
+    --hidden_dim 256 --k 60 \
+    --n_clauses_per_action 40 \
+    --sae_pretrain_epochs 150 \
+    --n_epochs 500 \
+    --logic_lr 3e-3 --bottleneck_lr 1e-2 \
+    --beta_action 5.0 --l0_penalty 5e-6 \
+    --lambda_sparsity 5e-4 \
+    --bimodal_max 0.2 --bimodal_warmup 60 --bimodal_ramp 150 \
+    --action_class_weights 1.0 2.0 1.2 1.0 \
+    --save_dir ./sae_logic_atari_E, 
+
+python check_success_rules.py \
+    --model_path ./sae_logic_atari_E/sae_logic_v3_model.pt \
+    --ppo_path ppo_atari_breakout.zip \
+    --env_name "ALE/Breakout-v5" \
+    --n_episodes 100 --print_rules
+
+
+
 Atari Good 8x
 python feature_space_analysis.py \
     --model_path ppo_atari_breakout.zip \
