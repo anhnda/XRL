@@ -848,9 +848,9 @@ def main(args):
     print("\n  === RAW FEATURE LINEAR PROBE ===")
     _probe = nn.Linear(features.shape[1], n_actions).to(device)
     _opt = torch.optim.Adam(_probe.parameters(), lr=1e-3)
-    _probe_loader = DataLoader(train_ds, batch_size=1024, shuffle=True,
+    _probe_loader = DataLoader(train_ds, batch_size=4096, shuffle=True,
                             num_workers=4, pin_memory=True)
-    _probe_val_loader = DataLoader(val_ds, batch_size=1024,
+    _probe_val_loader = DataLoader(val_ds, batch_size=4096,
                                 num_workers=4, pin_memory=True)
     for _ in range(20):                          # 100 → 20
         _probe.train()
