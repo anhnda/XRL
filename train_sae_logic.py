@@ -848,19 +848,24 @@ def main(args):
     print("\n  === RAW FEATURE LINEAR PROBE ===")
     _probe = nn.Linear(features.shape[1], n_actions).to(device)
     _opt = torch.optim.Adam(_probe.parameters(), lr=1e-3)
-    for _ in range(100):
-        for bx, ba in train_loader:
+    _probe_loader = DataLoader(train_ds, batch_size=1024, shuffle=True,
+                            num_workers=4, pin_memory=True)
+    _probe_val_loader = DataLoader(val_ds, batch_size=1024,
+                                num_workers=4, pin_memory=True)
+    for _ in range(20):                          # 100 → 20
+        _probe.train()
+        for bx, ba in _probe_loader:
             bx, ba = bx.to(device), ba.to(device)
             _opt.zero_grad()
             F.cross_entropy(_probe(bx), ba).backward()
             _opt.step()
     _correct = 0
+    _probe.eval()
     with torch.no_grad():
-        for bx, ba in val_loader:
+        for bx, ba in _probe_val_loader:
             bx, ba = bx.to(device), ba.to(device)
             _correct += (_probe(bx).argmax(1) == ba).sum().item()
-    print(f"  Raw 512-d feature linear probe val acc: {_correct/len(val_ds):.3f}")
-
+    print(f"  Raw feature linear probe val acc: {_correct/len(val_ds):.3f}")
 
     print(f"  Train: {len(train_ds)}, Val: {len(val_ds)}")
     print(f"\n  Class distribution:")
