@@ -407,17 +407,22 @@ def evaluate_rules_agent(
         bar = "█" * int(40 * cnt / max(total_actions, 1))
         print(f"    {name:14s}: {cnt:6d} ({100.0*cnt/max(total_actions,1):5.1f}%) {bar}")
     print("=" * 60)
-
-    return {
-        'success_rate':    success_rate,
-        'successes':       successes,
-        'n_episodes':      n_episodes,
-        'avg_reward':      float(np.mean(total_rewards)),
-        'std_reward':      float(np.std(total_rewards)),
-        'avg_length':      float(np.mean(episode_lengths)),
-        'std_length':      float(np.std(episode_lengths)),
-        'action_counts':   action_counts.tolist(),
-    }
+    # After evaluation, compare predicted action distribution vs training distribution
+    print("\n=== PREDICTED vs TRAINING ACTION DISTRIBUTION ===")
+    train_dist = [0.0, 36.1, 48.5, 7.1, 0.0, 8.2, 0.0]  # from your training data
+    play_dist  = [100 * c / total_actions for c in action_counts]
+    for name, td, pd in zip(action_names, train_dist, play_dist):
+        print(f"  {name:<14}: train={td:.1f}%  play={pd:.1f}%")
+        return {
+            'success_rate':    success_rate,
+            'successes':       successes,
+            'n_episodes':      n_episodes,
+            'avg_reward':      float(np.mean(total_rewards)),
+            'std_reward':      float(np.std(total_rewards)),
+            'avg_length':      float(np.mean(episode_lengths)),
+            'std_length':      float(np.std(episode_lengths)),
+            'action_counts':   action_counts.tolist(),
+        }
 
 
 # ============================================================================
