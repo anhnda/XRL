@@ -155,7 +155,8 @@ class ProductTNormLogicLayer(nn.Module):
         p_ex = p.unsqueeze(0)
         n_ex = n.unsqueeze(0)
 
-        literals = p_ex * f + n_ex * (1.0 - f) + (1.0 - p_ex - n_ex)
+        #literals = p_ex * f + n_ex * (1.0 - f) + (1.0 - p_ex - n_ex)
+        literals = p_ex * f + n_ex * (1.0 - f) + (1.0 - p_ex - n_ex) * 0.5
         log_literals = torch.log(literals + 1e-8)
         log_clause_sum = log_literals.sum(dim=-1)
 
@@ -163,9 +164,14 @@ class ProductTNormLogicLayer(nn.Module):
         clauses = clauses.view(batch_size, self.n_actions, self.n_clauses_per_action)
         return clauses.sum(dim=-1)
 
+    # In complexity_penalty():
     def complexity_penalty(self) -> torch.Tensor:
         p, n = self._get_selection_probs()
-        return self.l0_penalty_weight * (p + n).mean()
+        # L0 sparsity — keep total literals small
+        l0 = self.l0_penalty_weight * (p + n).mean()
+        # Entropy push — penalize p≈n≈0 (absent), reward decisive selection
+        entropy = -0.01 * (p * torch.log(p + 1e-8) + n * torch.log(n + 1e-8)).mean()
+        return l0 + entropy
 
     def extract_rules(self, feature_names=None, action_names=None, threshold=0.3):
         if feature_names is None:
