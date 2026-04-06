@@ -50,6 +50,7 @@ from scipy.stats import kurtosis as scipy_kurtosis
 ENV_REGISTRY = {
     # MiniGrid
     "MiniGrid-DoorKey-5x5-v0":     {"type": "minigrid", "n_actions": 7},
+    "MiniGrid-DoorKey-6x6-v0":     {"type": "minigrid", "n_actions": 7},
     "MiniGrid-DoorKey-8x8-v0":     {"type": "minigrid", "n_actions": 7},
     "MiniGrid-DoorKey-16x16-v0":   {"type": "minigrid", "n_actions": 7},
     "MiniGrid-FourRooms-v0":       {"type": "minigrid", "n_actions": 7},
