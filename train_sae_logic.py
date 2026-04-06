@@ -129,10 +129,9 @@ class ProductTNormLogicLayer(nn.Module):
         self.n_clauses_per_action = n_clauses_per_action
         self.l0_penalty_weight = l0_penalty_weight
         total_clauses = n_actions * n_clauses_per_action
-
-        self.w_pos = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01 - 3.0)
-        self.w_neg = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01 - 3.0)
-        self.clause_weight = nn.Parameter(torch.ones(total_clauses) * 2.0)
+        self.w_pos = nn.Parameter(torch.zeros(total_clauses, n_features))
+        self.w_neg = nn.Parameter(torch.zeros(total_clauses, n_features) - 2.0)
+        self.clause_weight = nn.Parameter(torch.zeros(total_clauses))  # was 2.0
 
     def _get_selection_probs(self):
         absent_logit = torch.zeros_like(self.w_pos)
