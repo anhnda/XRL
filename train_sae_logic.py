@@ -860,7 +860,21 @@ def main(args):
             bx, ba = bx.to(device), ba.to(device)
             _correct += (_probe(bx).argmax(1) == ba).sum().item()
     print(f"  Raw 512-d feature linear probe val acc: {_correct/len(val_ds):.3f}")
-
+    print("\n  === 128-d STAGE1 FEATURE LINEAR PROBE ===")
+    _probe2 = nn.Linear(features.shape[1], n_actions).to(device)
+    _opt2 = torch.optim.Adam(_probe2.parameters(), lr=1e-3)
+    for _ in range(100):
+        for bx, ba in train_loader:
+            bx, ba = bx.to(device), ba.to(device)
+            _opt2.zero_grad()
+            F.cross_entropy(_probe2(bx), ba).backward()
+            _opt2.step()
+    with torch.no_grad():
+        correct2 = sum(
+            (_probe2(bx.to(device)).argmax(1) == ba.to(device)).sum().item()
+            for bx, ba in val_loader
+        )
+    print(f"  128-d Stage1 feature linear probe val acc: {correct2/len(val_ds):.3f}")
 
     print(f"  Train: {len(train_ds)}, Val: {len(val_ds)}")
     print(f"\n  Class distribution:")
