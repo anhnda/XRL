@@ -129,24 +129,16 @@ class ProductTNormLogicLayer(nn.Module):
         self.n_clauses_per_action = n_clauses_per_action
         self.l0_penalty_weight = l0_penalty_weight
         total_clauses = n_actions * n_clauses_per_action
-        self.w_pos = nn.Parameter(torch.zeros(total_clauses, n_features) - 4.0)  # sigmoid(-4)≈0.02
-        self.w_neg = nn.Parameter(torch.zeros(total_clauses, n_features) - 4.0)  # both start inactive
-        self.clause_weight = nn.Parameter(torch.zeros(total_clauses) - 2.0)      # clauses start OFF
+        self.w_pos = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01 - 3.0)
+        self.w_neg = nn.Parameter(torch.randn(total_clauses, n_features) * 0.01 - 3.0)
+        self.clause_weight = nn.Parameter(torch.ones(total_clauses) * 2.0)     # clauses start OFF
 
     def _get_selection_probs(self):
-        # OLD: 3-way softmax — absent dominates at init
-        # absent_logit = torch.zeros_like(self.w_pos)
-        # logits = torch.stack([self.w_pos, self.w_neg, absent_logit], dim=-1)
-        # probs = F.softmax(logits, dim=-1)
-        # return probs[..., 0], probs[..., 1]
+        absent_logit = torch.zeros_like(self.w_pos)
+        logits = torch.stack([self.w_pos, self.w_neg, absent_logit], dim=-1)
+        probs = F.softmax(logits, dim=-1)
+        return probs[..., 0], probs[..., 1]
 
-        # NEW: independent sigmoids — start near 0, grow freely
-        p = torch.sigmoid(self.w_pos)  # prob of positive literal
-        n = torch.sigmoid(self.w_neg)  # prob of negative literal
-        # Clamp so p+n <= 1 (valid fuzzy probability)
-        total = p + n + 1e-8
-        scale = torch.clamp(total, max=1.0) / total
-        return p * scale, n * scale
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         batch_size = features.shape[0]
         p, n = self._get_selection_probs()
@@ -155,8 +147,7 @@ class ProductTNormLogicLayer(nn.Module):
         p_ex = p.unsqueeze(0)
         n_ex = n.unsqueeze(0)
 
-        #literals = p_ex * f + n_ex * (1.0 - f) + (1.0 - p_ex - n_ex)
-        literals = p_ex * f + n_ex * (1.0 - f) + (1.0 - p_ex - n_ex) * 0.5
+        literals = p_ex * f + n_ex * (1.0 - f) + (1.0 - p_ex - n_ex)
         log_literals = torch.log(literals + 1e-8)
         log_clause_sum = log_literals.sum(dim=-1)
 
@@ -164,14 +155,9 @@ class ProductTNormLogicLayer(nn.Module):
         clauses = clauses.view(batch_size, self.n_actions, self.n_clauses_per_action)
         return clauses.sum(dim=-1)
 
-    # In complexity_penalty():
     def complexity_penalty(self) -> torch.Tensor:
         p, n = self._get_selection_probs()
-        # L0 sparsity — keep total literals small
-        l0 = self.l0_penalty_weight * (p + n).mean()
-        # Entropy push — penalize p≈n≈0 (absent), reward decisive selection
-        entropy = -0.01 * (p * torch.log(p + 1e-8) + n * torch.log(n + 1e-8)).mean()
-        return l0 + entropy
+        return self.l0_penalty_weight * (p + n).mean()
 
     def extract_rules(self, feature_names=None, action_names=None, threshold=0.3):
         if feature_names is None:
