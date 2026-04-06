@@ -372,10 +372,10 @@ class SAELogicAgentV3(nn.Module):
             }
         return action_logits
 
-    def extract_rules(self, concept_labels=None, action_names=None):
+    def extract_rules(self, concept_labels=None, action_names=None, threshold=0.3):
         return self.logic_layer.extract_rules(
             feature_names=concept_labels,
-            action_names=action_names,
+            action_names=action_names, threshold=threshold
         )
 
 
@@ -977,7 +977,7 @@ def main(args):
     print(f"\n{'='*70}")
     print("LEARNED RULES (DNF)")
     print(f"{'='*70}")
-    rules = model.extract_rules(action_names=action_names)
+    rules = model.extract_rules(action_names=action_names, threshold=0.5)
     for aname, clauses in rules.items():
         print(f"\n{aname} ←")
         for i, c in enumerate(dict.fromkeys(clauses)):

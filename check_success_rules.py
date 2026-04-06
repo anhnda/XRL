@@ -145,7 +145,7 @@ class RulesAgent:
                 self.logic_model.config.n_actions,
                 env_type=detect_env_type(self.logic_model.config.env_name),
             )
-        rules = self.logic_model.extract_rules(action_names=action_names)
+        rules = self.logic_model.extract_rules(action_names=action_names, threshold=0.5)
         print("\n" + "=" * 60)
         print("ACTIVE LOGIC RULES")
         print("=" * 60)

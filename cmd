@@ -104,11 +104,11 @@ python train_sae_logic.py \
     --n_clauses_per_action 10 \
     --sae_pretrain_epochs 80 \
     --n_epochs 300 --beta_action 5.0 --lambda_sparsity 5e-5\
-    --max_grad_norm 5.0 
+    --max_grad_norm 5.0 --no_ica_init 
     --save_training_data
 python check_success_rules.py \
     --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
-    --ppo_path ppo_doorkey_5x5.zip \
+    --ppo_path ppo_doorkey_6x6.zip  --env_name MiniGrid-DoorKey-6x6-v0 \
     --n_episodes 100 --print_rules
     
 # Step 1: Re-collect with observations (same model, same env, same episodes)
