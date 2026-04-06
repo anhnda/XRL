@@ -10,6 +10,12 @@ python train_sae_logic.py --features_path ./pong_stage1/collected_data.pt   --st
 
     --action_class_weights 1.0 2.0 1.2 1.0 \
 
+python check_success_rules.py \
+    --model_path ./sae_logic_pong_A/sae_logic_v3_model.pt \
+    --ppo_path ppo_pong.zip \
+    --env_name "ALE/Pong-v5" \
+    --n_episodes 100 --print_rules
+
 Atari Next good 94%
 python feature_space_analysis.py \
     --model_path ppo_atari_breakout.zip \
