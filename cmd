@@ -103,7 +103,7 @@ python train_sae_logic.py \
     --hidden_dim 300 --k 50 \
     --n_clauses_per_action 10 \
     --sae_pretrain_epochs 80 \
-    --n_epochs 300 --beta_action 5.0 --l0_penalty 1e-3 \
+    --n_epochs 300 --beta_action 1.0 --l0_penalty 5e-3 \
     --max_grad_norm 5.0 --no_ica_init 
     --save_training_data
 python check_success_rules.py \
