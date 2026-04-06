@@ -919,7 +919,8 @@ def main(args):
         env_name=env_name,
         env_type=env_type,
     )
-
+    if args.no_ica_init:
+        config.use_ica_init = False
     # --- Model ---
     print("\nInitializing model...")
     model = SAELogicAgentV3(config, device=device)
@@ -1083,7 +1084,7 @@ Examples:
     parser.add_argument("--n_epochs", type=int, default=400)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
-
+    parser.add_argument("--no_ica_init", action="store_true", default=False)
     # LRs
     parser.add_argument("--sae_lr", type=float, default=1e-3)
     parser.add_argument("--logic_lr", type=float, default=3e-3)
@@ -1106,4 +1107,5 @@ Examples:
     parser.add_argument("--save_dir", type=str, default="./sae_logic_v3_outputs")
 
     args = parser.parse_args()
+
     main(args)
