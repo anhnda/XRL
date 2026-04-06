@@ -125,7 +125,7 @@ python train_sae_logic.py \
     --max_grad_norm 5.0 --save_training_data
 python check_success_rules.py \
     --model_path ./sae_logic_v3_outputs/sae_logic_v3_model.pt \
-    --ppo_path ppo_doorkey_5x5.zip \
+    --ppo_path ppo_doorkey_6x6.zip --env_name MiniGrid-DoorKey-6x6-v0 \
     --n_episodes 100 --print_rules
     
 # Step 1: Re-collect with observations (same model, same env, same episodes)
